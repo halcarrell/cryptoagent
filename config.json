@@ -21,6 +21,11 @@
       "mid_cap_rank51_100": 50
     }
   },
+  "strong_signals": {
+    "score_exceptional": 2.5,
+    "volume_surge_score": 3.0,
+    "ath_within_pct": 20.0
+  },
   "risk": {
     "min_risk_reward_gross": 2.0,
     "min_risk_reward_net": 1.6,

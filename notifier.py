@@ -78,6 +78,29 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None) -> None:
     })
 
 
+def notify_strong_signals(signals: list, date: str) -> None:
+    """Post a ⚡ Strong Signals alert when exceptional conditions are detected."""
+    if not signals:
+        return
+    fields = [
+        {
+            "name": f"{s['emoji']}  {s['symbol']}  —  {s['signal_type'].replace('_',' ').title()}",
+            "value": s["detail"],
+            "inline": False,
+        }
+        for s in signals[:10]
+    ]
+    _discord_post({
+        "embeds": [{
+            "title": f"⚡ Strong Signals — {date}",
+            "color": 0xF39C12,
+            "description": "These picks show exceptional characteristics. Worth watching closely today.",
+            "fields": fields,
+            "footer": {"text": "Strong signal ≠ guaranteed trade — still requires Pine confirmation"},
+        }]
+    })
+
+
 def notify_pine_snippet(pine_block: str, date: str) -> None:
     """Post the daily get_score() Pine Script block to Discord.
     User copies this and pastes into Pine Editor to auto-update all chart scores."""

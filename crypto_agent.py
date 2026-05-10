@@ -417,6 +417,72 @@ def cmd_backtest(conn):
         print(f"  {date}: avg_3d={avg_ret:+6.2f}%   equity={eq:.4f}x")
 
 
+# ---------- Strong signal detection ----------
+def detect_strong_signals(conn, date: str) -> list:
+    """Check today's picks for three exceptional conditions:
+    1. Composite score >= strong_signal threshold (exceptional momentum)
+    2. Volume score >= surge threshold (unusual buying activity)
+    3. Price within X% of all-time high (breakout candidate)
+    """
+    import json as _json
+    cfg_path = Path(__file__).parent / "config.json"
+    ss_cfg = {}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            ss_cfg = _json.load(f).get("strong_signals", {})
+
+    score_thresh  = ss_cfg.get("score_exceptional", 2.5)
+    vol_thresh    = ss_cfg.get("volume_surge_score", 3.0)
+    ath_within    = ss_cfg.get("ath_within_pct", 20.0)
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT p.symbol, p.composite_score, p.volume_score,
+               p.momentum_score, p.rs_score, p.entry_price,
+               s.ath_change_pct
+        FROM picks p
+        LEFT JOIN snapshots s ON s.coin_id = p.coin_id AND s.snapshot_date = p.pick_date
+        WHERE p.pick_date = ?
+        ORDER BY p.rank
+    """, (date,))
+
+    signals = []
+    seen = set()
+
+    for sym, score, vol_sc, mom_sc, rs_sc, price, ath_pct in cur.fetchall():
+        key = (sym, "score")
+        if score >= score_thresh and key not in seen:
+            seen.add(key)
+            signals.append({
+                "symbol": sym, "emoji": "🔥",
+                "signal_type": "exceptional_score",
+                "detail": (f"Composite score **{score:.2f}** — "
+                           f"momentum {mom_sc:+.2f}, relative strength {rs_sc:+.2f}"),
+            })
+
+        key = (sym, "volume")
+        if vol_sc is not None and vol_sc >= vol_thresh and key not in seen:
+            seen.add(key)
+            signals.append({
+                "symbol": sym, "emoji": "📊",
+                "signal_type": "volume_surge",
+                "detail": (f"Volume score **{vol_sc:.1f}σ** above average — "
+                           "unusual buying activity, watch for continuation"),
+            })
+
+        key = (sym, "ath")
+        if ath_pct is not None and ath_pct >= -ath_within and key not in seen:
+            seen.add(key)
+            signals.append({
+                "symbol": sym, "emoji": "🏔️",
+                "signal_type": "near_ath",
+                "detail": (f"Only **{abs(ath_pct):.1f}%** below all-time high @ ${price:.4g} — "
+                           "breakout candidate if momentum holds"),
+            })
+
+    return signals
+
+
 # ---------- Daily orchestration ----------
 def cmd_daily(conn):
     """Full daily run: fetch → evaluate → notify Discord + email health report.
@@ -496,7 +562,17 @@ def cmd_daily(conn):
     except Exception:
         pass
 
-    # 6. Discord daily picks summary + Pine Script snippet
+    # 6. Strong signal detection
+    try:
+        from notifier import notify_strong_signals
+        strong = detect_strong_signals(conn, today)
+        if strong:
+            notify_strong_signals(strong, today)
+            print(f"[daily] {len(strong)} strong signal(s) detected.", flush=True)
+    except Exception as e:
+        print(f"[daily] Strong signal check failed: {e}", flush=True)
+
+    # 7. Discord daily picks summary + Pine Script snippet
     try:
         notify_daily_picks(picks, today, warnings)
     except Exception as e:
