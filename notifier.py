@@ -28,6 +28,7 @@ from email.mime.text import MIMEText
 import requests
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+PORTFOLIO_USD       = float(os.environ.get("PORTFOLIO_USD", "10000"))
 EMAIL_FROM          = os.environ.get("EMAIL_FROM", "")
 EMAIL_TO            = os.environ.get("EMAIL_TO", "")
 EMAIL_APP_PASSWORD  = os.environ.get("EMAIL_APP_PASSWORD", "")
@@ -92,37 +93,61 @@ def notify_cron_failure(step: str, error: str) -> None:
     })
 
 
+def _binance_us_url(symbol: str) -> str:
+    """Build a direct Binance.US trading page link for a symbol like SOLUSDT."""
+    base = symbol.upper().replace("USDT", "").replace("USD", "")
+    return f"https://www.binance.us/trade/pro/{base}_USDT"
+
+
 def notify_trade_opened(trade: dict) -> None:
     sym    = trade.get("symbol", "?")
     side   = (trade.get("side") or "long").upper()
-    entry  = trade.get("entry_price", 0)
-    stop   = trade.get("stop_price", 0)
-    target = trade.get("target_price", 0)
-    size   = trade.get("size_pct", 0)
-    conf   = trade.get("confidence", 0)
+    entry  = trade.get("entry_price") or 0
+    stop   = trade.get("stop_price")  or 0
+    target = trade.get("target_price") or 0
+    size   = trade.get("size_pct") or 0
+    conf   = trade.get("confidence") or 0
     reason = trade.get("reasoning", "")
     tid    = trade.get("trade_id", "?")
 
-    risk   = abs(entry - stop)
-    reward = abs(target - entry)
-    rr     = f"{reward/risk:.2f}" if risk else "—"
+    # Price maths
+    risk        = abs(entry - stop)
+    reward      = abs(target - entry)
+    rr          = reward / risk if risk else 0
+    stop_pct    = (stop   - entry) / entry * 100 if entry else 0
+    target_pct  = (target - entry) / entry * 100 if entry else 0
+
+    # Dollar + quantity sizing
+    dollar_size = PORTFOLIO_USD * size / 100
+    quantity    = dollar_size / entry if entry else 0
+
+    # Format prices — more decimals for sub-$1 coins
+    def fmt(p): return f"${p:,.6g}"
+
+    action_emoji = "🟢" if side == "LONG" else "🔴"
+    action_word  = "BUY" if side == "LONG" else "SELL"
+    url          = _binance_us_url(sym)
+    now          = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    description = (
+        f"**{fmt(entry)}** entry\n"
+        f"Stop loss  **{fmt(stop)}**  `{stop_pct:+.1f}%`\n"
+        f"Take profit  **{fmt(target)}**  `{target_pct:+.1f}%`\n"
+        f"R:R  **{rr:.1f}:1**  •  Confidence  **{conf:.0%}**\n\n"
+        f"**What to do:**\n"
+        f"1️⃣  [Open {sym} on Binance.US]({url})\n"
+        f"2️⃣  {action_word}  **${dollar_size:,.0f}**  at market  (~{quantity:,.4g} units)\n"
+        f"3️⃣  Set stop-loss at  **{fmt(stop)}**\n"
+        f"4️⃣  Set take-profit at  **{fmt(target)}**\n\n"
+        f"*{reason[:180]}*" if reason else ""
+    )
 
     _discord_post({
         "embeds": [{
-            "title": f"📈 Paper trade opened #{tid}",
-            "color": 0x2ECC71,
-            "fields": [
-                {"name": "Symbol",     "value": sym,               "inline": True},
-                {"name": "Side",       "value": side,              "inline": True},
-                {"name": "R:R",        "value": rr,                "inline": True},
-                {"name": "Entry",      "value": f"${entry:,.4g}",  "inline": True},
-                {"name": "Stop",       "value": f"${stop:,.4g}",   "inline": True},
-                {"name": "Target",     "value": f"${target:,.4g}", "inline": True},
-                {"name": "Size",       "value": f"{size:.1f}%",    "inline": True},
-                {"name": "Confidence", "value": f"{conf:.0%}",     "inline": True},
-            ],
-            "description": reason[:200] if reason else None,
-            "footer": {"text": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
+            "title":       f"{action_emoji} PAPER {action_word} — {sym}  (trade #{tid})",
+            "color":       0x2ECC71 if side == "LONG" else 0xE74C3C,
+            "description": description,
+            "footer":      {"text": f"Portfolio ${PORTFOLIO_USD:,.0f}  •  Size {size:.1f}%  •  {now}"},
         }]
     })
 
@@ -131,20 +156,30 @@ def notify_trade_closed(trade: dict) -> None:
     sym    = trade.get("symbol", "?")
     status = trade.get("status", "closed").upper()
     pnl    = trade.get("pnl_pct", 0) or 0
+    entry  = trade.get("entry_price") or 0
+    exit_p = trade.get("exit_price")  or 0
+    size   = trade.get("size_pct") or 0
     tid    = trade.get("trade_id", "?")
 
-    color = 0x2ECC71 if pnl >= 0 else 0xE74C3C
-    emoji = "✅" if status == "TARGET" else "🛑"
+    dollar_pnl = PORTFOLIO_USD * size / 100 * pnl / 100
+    hit_target = status == "TARGET"
+    emoji      = "✅" if hit_target else "🛑"
+    color      = 0x2ECC71 if hit_target else 0xE74C3C
+    outcome    = "Target hit — take profit" if hit_target else "Stop hit — loss taken"
+    now        = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    description = (
+        f"**{outcome}**\n\n"
+        f"Entry  ${entry:,.6g}  →  Exit  ${exit_p:,.6g}\n"
+        f"P&L  **{pnl:+.2f}%**  ≈  **${dollar_pnl:+,.0f}** on this trade"
+    )
 
     _discord_post({
         "embeds": [{
-            "title": f"{emoji} Paper trade closed #{tid} — {status}",
-            "color": color,
-            "fields": [
-                {"name": "Symbol", "value": sym,             "inline": True},
-                {"name": "P&L",    "value": f"{pnl:+.2f}%", "inline": True},
-            ],
-            "footer": {"text": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
+            "title":       f"{emoji} PAPER TRADE CLOSED — {sym}  (#{tid})",
+            "color":       color,
+            "description": description,
+            "footer":      {"text": now},
         }]
     })
 
