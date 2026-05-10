@@ -1,4 +1,5 @@
 [deploy]
+startCommand = "python webhook_server.py"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
