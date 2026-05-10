@@ -14,3 +14,4 @@ class H(BaseHTTPRequestHandler):
 
 print(f"minimal server on :{PORT}", flush=True)
 HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+# force rebuild Sat May  9 20:11:33 CDT 2026
