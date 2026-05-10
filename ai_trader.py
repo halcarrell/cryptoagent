@@ -26,10 +26,23 @@ from typing import Optional
 # Railway (e.g. /data/crypto_agent.db) via the same env var.
 DB_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 
-# Risk parameters - tune to your tolerance
-MIN_SCORE_TO_TRADE = 0.5
-MAX_POSITION_PCT   = 5.0   # cap per-trade exposure
-MIN_RISK_REWARD    = 2.0   # require >= 2:1 R:R
+# Load exchange config
+def _load_config():
+    cfg_path = Path(__file__).parent / "config.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            return json.load(f)
+    return {}
+
+_CFG = _load_config()
+_SPOT_TAKER_FEE = _CFG.get("exchange", {}).get("spot", {}).get("taker_fee", 0.001)
+_PERP_ENABLED   = _CFG.get("exchange", {}).get("perp", {}).get("enabled", True)
+
+# Risk parameters — net R:R accounts for round-trip fees (2 × taker fee)
+MIN_SCORE_TO_TRADE = _CFG.get("risk", {}).get("min_score", 0.5)
+MAX_POSITION_PCT   = _CFG.get("risk", {}).get("max_position_pct", 5.0)
+MIN_RISK_REWARD    = _CFG.get("risk", {}).get("min_risk_reward_gross", 2.0)
+MIN_RISK_REWARD_NET = _CFG.get("risk", {}).get("min_risk_reward_net", 1.6)
 
 
 @dataclass
@@ -155,18 +168,12 @@ def strip_quote(symbol: str) -> str:
 
 
 def fetch_funding_rate(symbol: str) -> Optional[float]:
-    """Latest 8h funding rate from Binance Futures, as a decimal (0.0001 = 0.01%).
-    Returns None for spot-only symbols, network errors, or non-USDT pairs.
-    Free public endpoint, no key needed.
-
-    Why this matters: extreme positive funding on a long signal historically
-    signals an overcrowded trade — the technicals can be clean but the
-    crowd is already long, so the entry is mean-reversion bait. We're
-    capturing it here to validate that intuition against your own realized
-    returns before turning it into a hard filter."""
+    """Funding rate from Binance Futures. Returns None when perps are disabled
+    (Binance.US / US retail) or on any fetch error."""
+    if not _PERP_ENABLED:
+        return None
     try:
         import requests
-        # Binance perps are USDT-quoted; map common aliases.
         sym = symbol.upper().replace("USD", "USDT").replace("USDTT", "USDT")
         if not sym.endswith("USDT"):
             sym += "USDT"
@@ -204,9 +211,14 @@ def decide_trade(alert: dict) -> TradeDecision:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0, f"Invalid risk levels (risk={risk}, reward={reward}).")
     rr = reward / risk
-    if rr < MIN_RISK_REWARD:
+    # Fee-adjusted: subtract round-trip taker fees (entry + exit) from reward and add to risk
+    fee_cost = entry * _SPOT_TAKER_FEE * 2
+    rr_net = (reward - fee_cost) / (risk + fee_cost) if (risk + fee_cost) > 0 else 0
+    if rr < MIN_RISK_REWARD or rr_net < MIN_RISK_REWARD_NET:
         return TradeDecision("pass", side, symbol, entry, stop, target,
-                             0, 0.2, f"R:R={rr:.2f} below {MIN_RISK_REWARD} minimum.")
+                             0, 0.2,
+                             f"R:R={rr:.2f} (net={rr_net:.2f}) below "
+                             f"{MIN_RISK_REWARD}/{MIN_RISK_REWARD_NET} minimum.")
 
     # Cross-reference with screener picks
     base = strip_quote(symbol)

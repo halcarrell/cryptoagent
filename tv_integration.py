@@ -9,10 +9,54 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import sqlite3
+import time
 from pathlib import Path
 
-DB_PATH = Path("crypto_agent.db")
+import requests
+
+DB_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+
+EXCHANGE_API = {
+    "BINANCE":  "https://api.binance.com",
+    "BINANCE_US": "https://api.binance.us",
+    "BYBIT":    "https://api.bybit.com",
+}
+
+_tradeable_cache: dict[str, set] = {}
+
+
+def get_tradeable_pairs(exchange: str, quote: str = "USDT") -> set:
+    """Fetch the set of base symbols trading on this exchange as USDT pairs.
+    Returns uppercase base symbols, e.g. {'BTC', 'ETH', 'SOL', ...}.
+    Caches per process — safe for one-shot CLI use.
+    """
+    key = f"{exchange}:{quote}"
+    if key in _tradeable_cache:
+        return _tradeable_cache[key]
+
+    # Binance.US uses the same REST shape as Binance.com
+    base_url = EXCHANGE_API.get(exchange, EXCHANGE_API.get("BINANCE", ""))
+    if not base_url:
+        return set()
+
+    try:
+        r = requests.get(f"{base_url}/api/v3/exchangeInfo", timeout=10)
+        r.raise_for_status()
+        symbols = r.json().get("symbols", [])
+        tradeable = {
+            s["baseAsset"].upper()
+            for s in symbols
+            if s.get("quoteAsset", "").upper() == quote.upper()
+            and s.get("status") == "TRADING"
+        }
+        _tradeable_cache[key] = tradeable
+        return tradeable
+    except Exception as e:
+        print(f"Warning: could not fetch {exchange} pairs ({e}) — skipping filter")
+        return set()
 
 # CoinGecko symbol → exchange ticker overrides
 SYMBOL_OVERRIDES = {
@@ -58,18 +102,41 @@ def latest_picks(date=None):
     return date, rows
 
 
-def export_watchlist(date=None, exchange="BINANCE", out_path=None):
-    """Write a TradingView-importable watchlist (one symbol per line)."""
+def export_watchlist(date=None, exchange="BINANCE", out_path=None, filter_exchange=None):
+    """Write a TradingView-importable watchlist (one symbol per line).
+
+    filter_exchange: if set, pre-flight checks the exchange's public API and
+    drops picks not listed there. Pass 'BINANCE_US' for Binance.US users.
+    """
     date, rows = latest_picks(date)
     if not rows:
         print(f"No picks found for {date}")
         return
+
+    dropped = []
+    if filter_exchange:
+        quote = EXCHANGE_QUOTE.get(exchange, "USDT")
+        tradeable = get_tradeable_pairs(filter_exchange, quote)
+        if tradeable:
+            kept = []
+            for row in rows:
+                coin_id, sym, score, price = row
+                base = SYMBOL_OVERRIDES.get(coin_id, sym).upper()
+                if base in tradeable:
+                    kept.append(row)
+                else:
+                    dropped.append(sym)
+            rows = kept
+
     out_path = out_path or Path(f"watchlist_{date}_{exchange.lower()}.txt")
     with open(out_path, "w") as f:
         f.write(f"###Top picks {date}\n")
         for coin_id, sym, _, _ in rows:
             f.write(coingecko_to_tv_symbol(coin_id, sym, exchange) + "\n")
+
     print(f"Wrote {len(rows)} symbols to {out_path}")
+    if dropped:
+        print(f"Dropped {len(dropped)} picks not listed on {filter_exchange}: {', '.join(dropped)}")
     print("In TradingView: Watchlist → Import list → select this file")
 
 
@@ -103,10 +170,14 @@ def main():
     p = argparse.ArgumentParser(description="TradingView export utilities")
     p.add_argument("command", choices=["watchlist", "pine"])
     p.add_argument("--exchange", default="BINANCE", choices=list(EXCHANGE_QUOTE.keys()))
+    p.add_argument("--filter-exchange", default=None,
+                   help="Pre-flight filter: drop picks not listed on this exchange API "
+                        "(e.g. BINANCE_US). Recommended for US users.")
     p.add_argument("--date", default=None, help="YYYY-MM-DD (default: latest)")
     args = p.parse_args()
     if args.command == "watchlist":
-        export_watchlist(date=args.date, exchange=args.exchange)
+        export_watchlist(date=args.date, exchange=args.exchange,
+                         filter_exchange=args.filter_exchange)
     else:
         export_pine_score_block(date=args.date, exchange=args.exchange)
 
