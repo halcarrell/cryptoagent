@@ -417,19 +417,120 @@ def cmd_backtest(conn):
         print(f"  {date}: avg_3d={avg_ret:+6.2f}%   equity={eq:.4f}x")
 
 
+# ---------- Daily orchestration ----------
+def cmd_daily(conn):
+    """Full daily run: fetch → evaluate → notify Discord + email health report.
+    Designed to be the single cron command. Any step failure sends a Discord
+    alert and is re-raised so Railway marks the cron job as failed.
+    """
+    from notifier import notify_daily_picks, notify_cron_failure, send_health_report
+    import sqlite3 as _sqlite3
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    warnings = []
+
+    # 1. Fetch
+    try:
+        cmd_fetch(conn)
+    except Exception as e:
+        msg = f"fetch failed: {e}"
+        notify_cron_failure("fetch", msg)
+        raise
+
+    # 2. Evaluate realized returns
+    try:
+        cmd_evaluate(conn)
+    except Exception as e:
+        warnings.append(f"evaluate step failed: {e}")
+        notify_cron_failure("evaluate", str(e))
+
+    # 3. Pull today's picks for notifications
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT rank, symbol, composite_score, entry_price
+        FROM picks WHERE pick_date = ? ORDER BY rank
+    """, (today,))
+    picks = [
+        {"rank": r, "symbol": s, "composite_score": sc, "entry_price": pr}
+        for r, s, sc, pr in cur.fetchall()
+    ]
+
+    if not picks:
+        warnings.append("No picks returned today — CoinGecko may be rate-limiting.")
+        notify_cron_failure("picks empty", "No picks in DB after fetch.")
+
+    # 4. Coverage check
+    coverage = {"1d": 0.0, "3d": 0.0, "7d": 0.0}
+    try:
+        for h in [1, 3, 7]:
+            cur.execute(f"""
+                SELECT
+                    100.0 * SUM(CASE WHEN realized_{h}d IS NOT NULL THEN 1.0 ELSE 0.0 END)
+                        / MAX(COUNT(*), 1)
+                FROM picks
+                WHERE julianday(?) - julianday(pick_date) >= ?
+            """, (today, h))
+            row = cur.fetchone()
+            coverage[f"{h}d"] = round(row[0] or 0.0, 1)
+            if coverage[f"{h}d"] < 90 and coverage[f"{h}d"] > 0:
+                warnings.append(f"{h}d realized return coverage is {coverage[f'{h}d']:.0f}% — below 90%")
+    except Exception:
+        pass
+
+    # 5. Paper trade stats
+    paper_stats = {"open": 0, "total_closed": 0, "hit_rate": 0.0, "avg_pnl": 0.0}
+    try:
+        cur.execute("SELECT COUNT(*) FROM paper_trades WHERE status='open'")
+        paper_stats["open"] = cur.fetchone()[0] or 0
+        cur.execute("""
+            SELECT COUNT(*),
+                   100.0 * SUM(CASE WHEN status='target' THEN 1.0 ELSE 0.0 END) / MAX(COUNT(*),1),
+                   AVG(pnl_pct)
+            FROM paper_trades WHERE status != 'open'
+        """)
+        row = cur.fetchone()
+        if row and row[0]:
+            paper_stats["total_closed"] = row[0]
+            paper_stats["hit_rate"]     = round(row[1] or 0.0, 1)
+            paper_stats["avg_pnl"]      = round(row[2] or 0.0, 2)
+    except Exception:
+        pass
+
+    # 6. Discord daily picks summary
+    try:
+        notify_daily_picks(picks, today, warnings)
+    except Exception as e:
+        print(f"[daily] Discord notify failed: {e}", flush=True)
+
+    # 7. Email health report
+    try:
+        send_health_report(
+            date=today,
+            picks=picks,
+            paper_stats=paper_stats,
+            coverage=coverage,
+            warnings=warnings if warnings else None,
+        )
+    except Exception as e:
+        print(f"[daily] Email report failed: {e}", flush=True)
+
+    print(f"[daily] Done. {len(picks)} picks, {len(warnings)} warnings.", flush=True)
+
+
 # ---------- CLI ----------
 def main():
     p = argparse.ArgumentParser(description="Crypto screener agent")
-    p.add_argument("command", choices=["fetch", "evaluate", "report", "backtest"])
+    p.add_argument("command", choices=["fetch", "evaluate", "report", "backtest", "daily"])
     args = p.parse_args()
 
     conn = init_db()
     try:
         {
-            "fetch": cmd_fetch,
+            "fetch":    cmd_fetch,
             "evaluate": cmd_evaluate,
-            "report": cmd_report,
+            "report":   cmd_report,
             "backtest": cmd_backtest,
+            "daily":    cmd_daily,
         }[args.command](conn)
     finally:
         conn.close()

@@ -143,13 +143,39 @@ def init_trading_tables():
 
 
 # ---------- Context lookup ----------
+PICKS_MAX_AGE_HOURS = 36  # reject webhook alerts if picks are older than this
+
+
 def get_screener_context(symbol_base: str, date=None):
-    """If this symbol is in the latest screener picks, return rank/score."""
+    """If this symbol is in the latest screener picks, return rank/score.
+    Returns None if picks are missing or stale (> PICKS_MAX_AGE_HOURS old).
+    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     if not date:
-        cur.execute("SELECT MAX(pick_date) FROM picks")
-        date = cur.fetchone()[0]
+        try:
+            cur.execute("SELECT MAX(pick_date) FROM picks")
+            date = cur.fetchone()[0]
+        except Exception:
+            conn.close()
+            return None
+
+    if not date:
+        conn.close()
+        return None
+
+    # Staleness check
+    from datetime import date as _date
+    today = datetime.now(timezone.utc).date()
+    try:
+        pick_dt = datetime.strptime(date, "%Y-%m-%d").date()
+        age_hours = (today - pick_dt).days * 24
+        if age_hours > PICKS_MAX_AGE_HOURS:
+            conn.close()
+            return {"stale": True, "date": date, "age_hours": age_hours}
+    except Exception:
+        pass
+
     cur.execute(
         "SELECT rank, composite_score FROM picks WHERE pick_date = ? AND symbol = ?",
         (date, symbol_base.upper())
@@ -226,6 +252,10 @@ def decide_trade(alert: dict) -> TradeDecision:
     if not ctx:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.3, f"{base} not in today's screener top 10.")
+    if ctx.get("stale"):
+        return TradeDecision("pass", side, symbol, entry, stop, target,
+                             0, 0, f"Screener picks are {ctx['age_hours']}h old "
+                                   f"(last run: {ctx['date']}). Waiting for fresh data.")
     if ctx["score"] < MIN_SCORE_TO_TRADE:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.4,
