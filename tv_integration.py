@@ -140,6 +140,31 @@ def export_watchlist(date=None, exchange="BINANCE", out_path=None, filter_exchan
     print("In TradingView: Watchlist → Import list → select this file")
 
 
+def get_pine_score_string(date=None, exchange="BINANCE", filter_exchange=None) -> str:
+    """Return the get_score() Pine Script block as a string for Discord posting."""
+    date, rows = latest_picks(date)
+    if not rows:
+        return ""
+
+    if filter_exchange:
+        quote = EXCHANGE_QUOTE.get(exchange, "USDT")
+        tradeable = get_tradeable_pairs(filter_exchange, quote)
+        if tradeable:
+            rows = [r for r in rows
+                    if SYMBOL_OVERRIDES.get(r[0], r[1]).upper() in tradeable]
+
+    lines = [
+        f"get_score(ticker) =>",
+        f"    s = 0.0",
+    ]
+    for coin_id, sym, score, _ in rows:
+        tv_ticker = coingecko_to_tv_symbol(coin_id, sym, exchange).split(":")[1]
+        lines.append(f"    if ticker == \"{tv_ticker}\"")
+        lines.append(f"        s := {score:.2f}")
+    lines.append("    s")
+    return "\n".join(lines)
+
+
 def export_pine_score_block(date=None, exchange="BINANCE", out_path=None):
     """Generate a Pine Script lookup function: ticker → screener score.
     Paste the output into the indicator under the score input."""

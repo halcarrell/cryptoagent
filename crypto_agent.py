@@ -496,11 +496,20 @@ def cmd_daily(conn):
     except Exception:
         pass
 
-    # 6. Discord daily picks summary
+    # 6. Discord daily picks summary + Pine Script snippet
     try:
         notify_daily_picks(picks, today, warnings)
     except Exception as e:
-        print(f"[daily] Discord notify failed: {e}", flush=True)
+        print(f"[daily] Discord picks notify failed: {e}", flush=True)
+
+    try:
+        from tv_integration import get_pine_score_string
+        from notifier import notify_pine_snippet
+        pine_block = get_pine_score_string(today, exchange="BINANCE", filter_exchange="BINANCE_US")
+        if pine_block:
+            notify_pine_snippet(pine_block, today)
+    except Exception as e:
+        print(f"[daily] Pine snippet notify failed: {e}", flush=True)
 
     # 7. Email health report
     try:

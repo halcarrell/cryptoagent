@@ -78,6 +78,25 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None) -> None:
     })
 
 
+def notify_pine_snippet(pine_block: str, date: str) -> None:
+    """Post the daily get_score() Pine Script block to Discord.
+    User copies this and pastes into Pine Editor to auto-update all chart scores."""
+    if not pine_block:
+        return
+    _discord_post({
+        "embeds": [{
+            "title": f"🌲 Pine Script scores — {date}",
+            "color": 0x1ABC9C,
+            "description": (
+                "Copy the block below and paste it into your indicator in Pine Editor "
+                "(between the dashed lines), then click **Save**. "
+                "All charts update automatically.\n\n"
+                f"```pine\n{pine_block}\n```"
+            ),
+        }]
+    })
+
+
 def notify_cron_failure(step: str, error: str) -> None:
     """Red Discord alert when the daily cron fails."""
     _discord_post({
