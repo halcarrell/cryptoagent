@@ -54,6 +54,7 @@ WEIGHTS = {
 
 # ---------- Database ----------
 def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     # WAL mode is required when multiple processes share this DB (Railway:
     # cron service + webhook service both write). Default rollback journal

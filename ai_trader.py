@@ -77,6 +77,7 @@ def _add_missing_columns(conn, table: str, columns):
 
 
 def init_trading_tables():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     # See crypto_agent.init_db for rationale; WAL persists in the file header
     # so re-setting it from this service is idempotent.

@@ -31,6 +31,9 @@ AUTH_TOKEN = os.environ.get("WEBHOOK_AUTH_TOKEN", "CHANGE_ME")
 USE_LLM = os.environ.get("USE_LLM_DECIDER", "false").lower() == "true"
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+# Ensure DB schema exists when gunicorn imports this module (not just in __main__)
+ai_trader.init_trading_tables().close()
+
 
 @app.route("/", methods=["GET"])
 def health():
