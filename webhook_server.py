@@ -21,8 +21,13 @@ In TradingView:
 
 import json
 import os
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
 
 from flask import Flask, jsonify, request
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import ai_trader
 
@@ -36,6 +41,72 @@ try:
     print("DB init OK", flush=True)
 except Exception as e:
     print(f"DB init warning: {e} — tables will be created on first request", flush=True)
+
+
+# ── Background scheduler ────────────────────────────────────────────────────
+
+def _run_daily():
+    """Runs in a background thread — fetch picks, evaluate, notify Discord + email."""
+    print("[scheduler] Starting daily run...", flush=True)
+    try:
+        import crypto_agent
+        conn = crypto_agent.init_db()
+        try:
+            crypto_agent.cmd_daily(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[scheduler] Daily run failed: {e}", flush=True)
+        try:
+            from notifier import notify_cron_failure
+            notify_cron_failure("daily screener", str(e))
+        except Exception:
+            pass
+
+
+def _run_refit():
+    """Weekly walk-forward weight refit — runs Sundays 14:00 UTC."""
+    print("[scheduler] Starting weekly refit...", flush=True)
+    try:
+        import weight_refitter
+        if weight_refitter.schema_ok():
+            weight_refitter.refit_and_write()
+        else:
+            print("[scheduler] Refit skipped — not enough data yet.", flush=True)
+    except Exception as e:
+        print(f"[scheduler] Refit failed: {e}", flush=True)
+
+
+def _picks_exist_today() -> bool:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        db = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM picks WHERE pick_date = ?", (today,))
+        count = cur.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception:
+        return False
+
+
+def start_scheduler():
+    scheduler = BackgroundScheduler(timezone="UTC")
+    # Daily screener: 1pm UTC every day
+    scheduler.add_job(_run_daily, "cron", hour=13, minute=0, id="daily")
+    # Weekly refit: 2pm UTC every Sunday
+    scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=0, id="refit")
+    scheduler.start()
+    print("[scheduler] Started — daily@13:00 UTC, refit@Sunday 14:00 UTC", flush=True)
+
+    # Catch-up: if it's past 1pm UTC and no picks yet today, run immediately
+    now = datetime.now(timezone.utc)
+    if now.hour >= 13 and not _picks_exist_today():
+        print("[scheduler] No picks yet today — running catch-up fetch now.", flush=True)
+        threading.Thread(target=_run_daily, daemon=True).start()
+
+    return scheduler
 
 
 @app.route("/", methods=["GET"])
@@ -94,12 +165,10 @@ def _mask_secret(s: str) -> str:
 
 
 if __name__ == "__main__":
-    # DB already initialized at module level (with error handling).
-    # Railway injects PORT; falls back to 8080 for local dev.
     port = int(os.environ.get("PORT", 8080))
     print(f"Webhook server starting on :{port}")
-    # Never log the auth token in plaintext — masked so logs/screenshots don't leak it.
     print(f"Auth token: {_mask_secret(AUTH_TOKEN)}")
     print(f"Anthropic key: {'configured' if ANTHROPIC_KEY else 'not set'}")
     print(f"Decider: {'Claude LLM' if USE_LLM and ANTHROPIC_KEY else 'rules-based'}")
+    start_scheduler()
     app.run(host="0.0.0.0", port=port, debug=False)
