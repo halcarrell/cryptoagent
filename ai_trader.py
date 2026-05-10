@@ -389,6 +389,17 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
     tid = cur.lastrowid
     conn.commit()
     conn.close()
+
+    try:
+        from notifier import notify_trade_opened
+        notify_trade_opened({
+            "trade_id": tid, "symbol": d.symbol, "side": d.side,
+            "entry_price": d.entry, "stop_price": d.stop, "target_price": d.target,
+            "size_pct": d.size_pct, "confidence": d.confidence, "reasoning": d.reasoning,
+        })
+    except Exception:
+        pass
+
     return tid
 
 
@@ -497,6 +508,14 @@ def evaluate_open_trades():
             """, (status, closed_at.isoformat(), exit_p, pnl,
                   mfe, mae, time_in_trade_h, t["trade_id"]))
             closed += 1
+            try:
+                from notifier import notify_trade_closed
+                notify_trade_closed({
+                    "trade_id": t["trade_id"], "symbol": t["symbol"],
+                    "status": status, "pnl_pct": pnl,
+                })
+            except Exception:
+                pass
         else:
             # Still open — keep MFE/MAE current so we always have the latest
             # excursion stats available for in-flight inspection.
