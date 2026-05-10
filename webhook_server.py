@@ -94,9 +94,8 @@ def _mask_secret(s: str) -> str:
 
 
 if __name__ == "__main__":
-    ai_trader.init_trading_tables()
-    # Railway (and most PaaS) inject PORT; bind to it instead of hardcoding 8080.
-    # Falls back to 8080 for local dev / ngrok.
+    # DB already initialized at module level (with error handling).
+    # Railway injects PORT; falls back to 8080 for local dev.
     port = int(os.environ.get("PORT", 8080))
     print(f"Webhook server starting on :{port}")
     # Never log the auth token in plaintext — masked so logs/screenshots don't leak it.
