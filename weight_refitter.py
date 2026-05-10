@@ -22,13 +22,14 @@ Usage:
 """
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DB_PATH      = Path("crypto_agent.db")
-WEIGHTS_PATH = Path("weights.json")
+DB_PATH      = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+WEIGHTS_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db")).parent / "weights.json"
 
 FACTORS = ["momentum", "volume", "volatility", "reversal", "rel_strength"]
 CURRENT_WEIGHTS = {
@@ -291,7 +292,28 @@ def refit_and_write():
     }
     WEIGHTS_PATH.write_text(json.dumps(payload, indent=2))
     print(f"\nWritten to {WEIGHTS_PATH}. Sanity-check before applying.")
-    print("Run `python weight_refitter.py validate` to see OOS performance.")
+    print("Run `python3 weight_refitter.py validate` to see OOS performance.")
+
+    # Discord summary
+    try:
+        from notifier import _discord_post
+        rows = "\n".join(
+            f"{f:<14} {CURRENT_WEIGHTS[f]:.3f} → {smoothed[f]:.3f}  "
+            f"({'↑' if smoothed[f] > CURRENT_WEIGHTS[f] else '↓'}{abs(smoothed[f]-CURRENT_WEIGHTS[f]):.3f})"
+            for f in FACTORS
+        )
+        _discord_post({"embeds": [{
+            "title": "⚖️ Weekly weight refit complete",
+            "color": 0x9B59B6,
+            "description": f"```\n{rows}\n```",
+            "fields": [
+                {"name": "Training window", "value": f"{start} → {end}", "inline": True},
+                {"name": "Observations",   "value": str(len(data)),       "inline": True},
+            ],
+            "footer": {"text": "Review weights.json before applying — run validate first"},
+        }]})
+    except Exception:
+        pass
 
 
 # ----- Status -----
