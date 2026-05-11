@@ -39,6 +39,12 @@ EXCLUDE_KEYWORDS = [
     "usd", "usdt", "usdc", "dai", "busd", "tusd", "fdusd",
     "wrapped", "staked", "liquid staked", "stake",
 ]
+
+# Pump guard: coins that have already moved this much are likely in a
+# late-stage pump — fade risk outweighs chase opportunity.
+MAX_7D_CHANGE_PCT  = 60.0  # drop coins up > 60% in 7 days
+MAX_24H_CHANGE_PCT = 25.0  # drop coins up > 25% in 24 hours
+MAX_RS_SCORE       = 5.0   # drop coins with extreme relative-strength z-score
 EVAL_HORIZONS = [1, 3, 7]
 REQUEST_DELAY = 1.5  # seconds between API calls (free tier ~30/min)
 
@@ -163,6 +169,8 @@ def compute_signals(coins, btc_change_7d):
         and c.get("total_volume") and c["total_volume"] >= MIN_DAILY_VOLUME
         and not is_excluded(c)
         and c.get("price_change_percentage_24h_in_currency") is not None
+        and abs(c.get("price_change_percentage_7d_in_currency") or 0) <= MAX_7D_CHANGE_PCT
+        and abs(c.get("price_change_percentage_24h_in_currency") or 0) <= MAX_24H_CHANGE_PCT
     ]
 
     momentum_7d  = [c.get("price_change_percentage_7d_in_currency")  or 0 for c in eligible]
@@ -207,6 +215,8 @@ def compute_signals(coins, btc_change_7d):
             "rs_score": rs,
         })
 
+    # Drop extreme RS outliers — these are late-stage pumps, not early entries
+    scored = [s for s in scored if abs(s["rs_score"]) <= MAX_RS_SCORE]
     scored.sort(key=lambda x: x["composite_score"], reverse=True)
     return scored
 
@@ -253,6 +263,10 @@ def cmd_fetch(conn):
         ))
 
     picks = scored[:TOP_N_PICKS]
+
+    # Clear today's picks before inserting fresh ones so re-runs don't leave
+    # stale entries from previous fetches (e.g. coins filtered by pump guard).
+    cur.execute("DELETE FROM picks WHERE pick_date = ?", (today,))
 
     for rank, p in enumerate(picks, 1):
         cur.execute("""
