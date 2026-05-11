@@ -446,10 +446,19 @@ def detect_strong_signals(conn, date: str) -> list:
         ORDER BY p.rank
     """, (date,))
 
+    # Only alert on coins actually tradeable on the configured exchange
+    try:
+        from tv_integration import get_tradeable_pairs
+        tradeable = get_tradeable_pairs("BINANCE_US", "USDT")
+    except Exception:
+        tradeable = set()
+
     signals = []
     seen = set()
 
     for sym, score, vol_sc, mom_sc, rs_sc, price, ath_pct in cur.fetchall():
+        if tradeable and sym.upper() not in tradeable:
+            continue
         key = (sym, "score")
         if score >= score_thresh and key not in seen:
             seen.add(key)
