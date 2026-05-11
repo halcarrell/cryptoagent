@@ -73,9 +73,9 @@ plot(ema200, color=color.purple, title="EMA200")
 
 // Background: gold for exceptional score (≥2.5), green for standard pick
 is_exceptional = score >= 2.5
-bgcolor(is_exceptional ? color.new(color.yellow, 85) :
-        score_ok       ? color.new(color.green,  92) : na,
-        title="Score strength")
+var bg = color(na)
+bg := is_exceptional ? color.new(color.yellow, 85) : score_ok ? color.new(color.green, 92) : color(na)
+bgcolor(bg, title="Score strength")
 
 // Label colour scales with signal strength
 label_col = is_exceptional ? color.new(color.orange, 0) : color.green
