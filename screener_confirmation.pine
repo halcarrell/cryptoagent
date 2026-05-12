@@ -1,67 +1,50 @@
-//@version=5
+//@version=6
 // =============================================================
 // Screener Confirmation Signals
-//   - Takes screener composite score as input (or via get_score lookup)
-//   - Confirms with technicals: RSI bounce, VWAP reclaim, volume spike, HTF trend
-//   - On confirmation, fires alert with structured JSON for the webhook server
-// Paste into TradingView → Pine Editor → Save As → Add to chart
+//   - Confirms entries with technicals: RSI bounce, VWAP reclaim,
+//     volume spike, EMA trend
+//   - Fires a webhook alert with entry/stop/target to the Python server
+//   - Score checking is done SERVER-SIDE — no daily updates needed here
+//   - Set your webhook auth token once in the Alert / Webhook settings
 // =============================================================
 indicator("Screener Confirmation", overlay=true, max_labels_count=50)
 
-// ===== Inputs =====
-g_score = "Screener Score"
-score_manual = input.float(0.0, "Manual score override", group=g_score,
-     tooltip="Set this from your daily report, OR paste tv_integration's get_score() function below and replace this with a lookup.")
-min_score = input.float(0.5, "Min score to enable signals", group=g_score)
-
+// ===== Confirmation Filters =====
 g_filt = "Confirmation Filters"
 use_rsi    = input.bool(true,  "RSI bounce (was oversold)", group=g_filt)
 use_vwap   = input.bool(true,  "VWAP reclaim",              group=g_filt)
 use_vol    = input.bool(true,  "Volume spike (1.5x avg)",   group=g_filt)
 use_trend  = input.bool(true,  "EMA50 > EMA200 trend",      group=g_filt)
 
+// ===== Risk Settings =====
 g_risk = "Risk"
-atr_stop_mult   = input.float(1.5, "ATR stop multiplier",       group=g_risk)
-atr_target_mult = input.float(3.0, "ATR target multiplier",     group=g_risk)
+atr_stop_mult   = input.float(1.5, "ATR stop multiplier",   group=g_risk)
+atr_target_mult = input.float(3.0, "ATR target multiplier", group=g_risk)
 
-g_alert = "Alert / Webhook"
-auth_token = input.string("$WEBHOOK_AUTH_TOKEN", "Webhook auth token", group=g_alert)
-
-// ===== Daily score lookup =====
-// Each morning, copy the get_score() block from Discord and paste it here,
-// replacing everything between the two dashed lines. Save → indicator updates
-// automatically on all charts. Manual override below is a fallback only.
-// ── PASTE DAILY BLOCK START ──
-get_score(ticker) =>
-    s = 0.0
-    // no picks loaded yet — paste today's block from Discord
-    s
-// ── PASTE DAILY BLOCK END ──
-
-score = get_score(syminfo.ticker)
-if score == 0.0
-    score := score_manual  // fallback: manual override for testing
+// ===== Webhook =====
+g_alert    = "Alert / Webhook"
+auth_token = input.string("PASTE_YOUR_TOKEN_HERE", "Webhook auth token", group=g_alert,
+     tooltip="Copy WEBHOOK_AUTH_TOKEN from Railway → your service → Variables")
 
 // ===== Indicators =====
-rsi_v   = ta.rsi(close, 14)
+rsi_v            = ta.rsi(close, 14)
 rsi_was_oversold = ta.barssince(rsi_v < 30) < 5
-vwap_v  = ta.vwap(hlc3)
-crossed_vwap = ta.crossover(close, vwap_v)
-vol_avg = ta.sma(volume, 20)
-vol_spike = volume > vol_avg * 1.5
-ema50   = ta.ema(close, 50)
-ema200  = ta.ema(close, 200)
-trend_up = ema50 > ema200
-atr_v   = ta.atr(14)
+vwap_v           = ta.vwap(hlc3)
+crossed_vwap     = ta.crossover(close, vwap_v)
+vol_avg          = ta.sma(volume, 20)
+vol_spike        = volume > vol_avg * 1.5
+ema50            = ta.ema(close, 50)
+ema200           = ta.ema(close, 200)
+trend_up         = ema50 > ema200
+atr_v            = ta.atr(14)
 
-// ===== Conditions =====
-score_ok = score >= min_score
+// ===== Signal Conditions =====
 rsi_ok   = not use_rsi   or rsi_was_oversold
 vwap_ok  = not use_vwap  or crossed_vwap
 vol_ok   = not use_vol   or vol_spike
 trend_ok = not use_trend or trend_up
 
-long_entry = score_ok and rsi_ok and vwap_ok and vol_ok and trend_ok
+long_entry = rsi_ok and vwap_ok and vol_ok and trend_ok
 
 stop_price   = close - atr_v * atr_stop_mult
 target_price = close + atr_v * atr_target_mult
@@ -70,40 +53,30 @@ target_price = close + atr_v * atr_target_mult
 plot(vwap_v, color=color.orange, title="VWAP")
 plot(ema50,  color=color.blue,   title="EMA50")
 plot(ema200, color=color.purple, title="EMA200")
-
-// Background: gold for exceptional score (≥2.5), green for standard pick
-is_exceptional = score >= 2.5
-var bg = color(na)
-bg := is_exceptional ? color.new(color.yellow, 85) : score_ok ? color.new(color.green, 92) : color(na)
-bgcolor(bg, title="Score strength")
-
-// Label colour scales with signal strength
-label_col = is_exceptional ? color.new(color.orange, 0) : color.green
-label_txt  = (is_exceptional ? "⚡ STRONG\n" : "LONG\n") +
-             "Score:" + str.tostring(score, "#.##") + "\n" +
-             "E:" + str.tostring(close, format.mintick) +
-             "\nS:" + str.tostring(stop_price, format.mintick) +
-             "\nT:" + str.tostring(target_price, format.mintick)
+bgcolor(long_entry ? color.new(color.green, 90) : na, title="Signal active")
 
 if long_entry
-    label.new(bar_index, low, label_txt,
-              color=label_col, textcolor=color.white,
+    label.new(bar_index, low,
+              "SIGNAL\nE:" + str.tostring(close, format.mintick) +
+              "\nS:" + str.tostring(stop_price, format.mintick) +
+              "\nT:" + str.tostring(target_price, format.mintick),
+              color=color.green, textcolor=color.white,
               style=label.style_label_up, yloc=yloc.belowbar)
 
-// ===== Alert with JSON payload for webhook server =====
+// ===== Webhook Alert =====
+// Server checks: is this coin in today's top 10? Score high enough? R:R valid?
+// Pine Script just confirms the technical setup and sends the prices.
 if long_entry
-    payload = '{"auth":"' + auth_token + '"' +
-              ',"symbol":"' + syminfo.ticker + '"' +
-              ',"exchange":"' + syminfo.prefix + '"' +
-              ',"side":"long"' +
-              ',"entry":'  + str.tostring(close) +
-              ',"stop":'   + str.tostring(stop_price) +
-              ',"target":' + str.tostring(target_price) +
-              ',"score":'  + str.tostring(score) +
-              ',"rsi":'    + str.tostring(rsi_v) +
-              ',"time":"'  + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
+    payload = '{"auth":"'    + auth_token               + '"' +
+              ',"symbol":"'  + syminfo.ticker            + '"' +
+              ',"exchange":"' + syminfo.prefix           + '"' +
+              ',"side":"long"'                                  +
+              ',"entry":'    + str.tostring(close)       +
+              ',"stop":'     + str.tostring(stop_price)  +
+              ',"target":'   + str.tostring(target_price)+
+              ',"rsi":'      + str.tostring(rsi_v)       +
+              ',"time":"'    + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
     alert(payload, alert.freq_once_per_bar_close)
 
-// Also expose alertcondition for users without webhooks
 alertcondition(long_entry, title="Long entry confirmed",
-     message="Long entry on {{ticker}} - check Python webhook server for details")
+     message="Technical signal on {{ticker}} — check Python server for decision")
