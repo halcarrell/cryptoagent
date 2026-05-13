@@ -20,35 +20,65 @@ import requests
 DB_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 
 EXCHANGE_API = {
-    "BINANCE":  "https://api.binance.com",
+    "BINANCE":    "https://api.binance.com",
     "BINANCE_US": "https://api.binance.us",
-    "BYBIT":    "https://api.bybit.com",
+    "BYBIT":      "https://api.bybit.com",
 }
 
 _tradeable_cache: dict[str, set] = {}
 
 
-def get_tradeable_pairs(exchange: str, quote: str = "USDT") -> set:
-    """Fetch the set of base symbols trading on this exchange as USDT pairs.
-    Returns uppercase base symbols, e.g. {'BTC', 'ETH', 'SOL', ...}.
-    Caches per process — safe for one-shot CLI use.
+def _get_coinbase_pairs() -> set:
+    """Fetch all base assets tradeable on Coinbase (USD or USDC quoted).
+    Uses the public Coinbase Exchange API — no key needed.
     """
+    key = "COINBASE:USD"
+    if key in _tradeable_cache:
+        return _tradeable_cache[key]
+    try:
+        r = requests.get("https://api.exchange.coinbase.com/products", timeout=10)
+        r.raise_for_status()
+        tradeable = {
+            p["base_currency"].upper()
+            for p in r.json()
+            if p.get("quote_currency") in ("USD", "USDC")
+            and p.get("status") == "online"
+            and not p.get("trading_disabled", True)
+        }
+        _tradeable_cache[key] = tradeable
+        return tradeable
+    except Exception as e:
+        print(f"Warning: could not fetch Coinbase pairs ({e})")
+        return set()
+
+
+def get_tradeable_pairs(exchange: str, quote: str = "USDT") -> set:
+    """Fetch base symbols tradeable on the given exchange.
+
+    Special value 'US_EXCHANGES' returns the union of Binance.US and Coinbase —
+    a coin passes if it's available on either platform.
+    """
+    if exchange == "US_EXCHANGES":
+        binance_us = get_tradeable_pairs("BINANCE_US", quote)
+        coinbase   = _get_coinbase_pairs()
+        combined   = binance_us | coinbase
+        _tradeable_cache["US_EXCHANGES:USD"] = combined
+        return combined
+
     key = f"{exchange}:{quote}"
     if key in _tradeable_cache:
         return _tradeable_cache[key]
 
-    # Binance.US uses the same REST shape as Binance.com
-    base_url = EXCHANGE_API.get(exchange, EXCHANGE_API.get("BINANCE", ""))
+    base_url = EXCHANGE_API.get(exchange, "")
     if not base_url:
         return set()
 
     try:
         r = requests.get(f"{base_url}/api/v3/exchangeInfo", timeout=10)
         r.raise_for_status()
-        symbols = r.json().get("symbols", [])
         tradeable = {
             s["baseAsset"].upper()
-            for s in symbols
+            for s in r.json().get("symbols", [])
             if s.get("quoteAsset", "").upper() == quote.upper()
             and s.get("status") == "TRADING"
         }
@@ -196,8 +226,8 @@ def main():
     p.add_argument("command", choices=["watchlist", "pine"])
     p.add_argument("--exchange", default="BINANCE", choices=list(EXCHANGE_QUOTE.keys()))
     p.add_argument("--filter-exchange", default=None,
-                   help="Pre-flight filter: drop picks not listed on this exchange API "
-                        "(e.g. BINANCE_US). Recommended for US users.")
+                   help="Pre-flight filter: drop picks not listed on this exchange. "
+                        "Use BINANCE_US, COINBASE, or US_EXCHANGES (Binance.US + Coinbase combined).")
     p.add_argument("--date", default=None, help="YYYY-MM-DD (default: latest)")
     args = p.parse_args()
     if args.command == "watchlist":

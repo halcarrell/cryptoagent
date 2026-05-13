@@ -463,7 +463,7 @@ def detect_strong_signals(conn, date: str) -> list:
     # Only alert on coins actually tradeable on the configured exchange
     try:
         from tv_integration import get_tradeable_pairs
-        tradeable = get_tradeable_pairs("BINANCE_US", "USDT")
+        tradeable = get_tradeable_pairs("US_EXCHANGES", "USDT")
     except Exception:
         tradeable = set()
 
