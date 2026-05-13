@@ -198,14 +198,19 @@ These are late-stage pumps — entry risk outweighs opportunity.
 
 ### Exchange Filtering
 
-Picks are filtered to coins tradeable on **US exchanges** — Binance.US or Coinbase. A coin passes if it's available on either platform.
+Picks are filtered to coins tradeable on **US exchanges** — Binance.US or Coinbase. A coin passes if it's available on either platform. Discord and the watchlist file both use this filter automatically.
 
-To see what would pass without the filter:
+**Standard daily command (use this):**
+```bash
+python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES
+```
+
+**To see all picks without any filter:**
 ```bash
 python3 tv_integration.py watchlist --exchange BINANCE
 ```
 
-To use only Binance.US:
+**To restrict to Binance.US only:**
 ```bash
 python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange BINANCE_US
 ```
