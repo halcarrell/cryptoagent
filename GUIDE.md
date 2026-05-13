@@ -3,16 +3,16 @@
 ## What Does This System Do?
 
 Every day your system automatically:
-1. **Scans** the top 250 cryptocurrencies and scores them on momentum, volume, trend strength, and other factors
-2. **Filters** out pump-and-dump tokens, stablecoins, and coins not available on Binance.US
-3. **Picks** the top coins and posts them to Discord with scores
-4. **Flags** any exceptional signals (volume surges, near all-time highs, exceptional scores)
-5. **Watches** TradingView charts all day for technical confirmations (RSI bounce, VWAP reclaim, volume spike, uptrend)
+1. **Scans** the top 250 cryptocurrencies and scores them on momentum, volume, trend, and relative strength
+2. **Filters** out pump tokens (>60% 7d / >25% 24h moves), stablecoins, and coins not available on any US exchange
+3. **Picks** the top coins and posts them to Discord
+4. **Flags** exceptional signals — unusual volume, near all-time highs, top scores
+5. **Watches** TradingView charts all day for technical confirmations
 6. **Receives** alerts from TradingView when a signal fires
-7. **Decides** whether to open a paper trade (checks R:R, score, staleness)
+7. **Decides** whether to open a paper trade (checks R:R, screener score, data freshness)
 8. **Pings Discord** with a trade card when a paper trade opens or closes
 
-> **This is paper trading only.** No real money moves. The goal is 30–60 days of validation before considering live trading.
+> **This is paper trading only.** No real money moves. Validate for 30–60 days before considering live trading.
 
 ---
 
@@ -24,15 +24,14 @@ Every day your system automatically:
 | **Railway** | Runs the server 24/7 | ~$5/month |
 | **TradingView** | Charts + signal alerts | Essential plan ($15/mo minimum) — webhooks require a paid plan |
 | **Discord** | Trade notifications | Free |
-| **Binance.US** | Exchange your picks are filtered for | Free to open |
+| **Binance.US** | Primary US exchange | Free to open |
+| **Coinbase** | Secondary US exchange (more coins available) | Free to open |
 
 ---
 
 ## Part 1 — Setup Guide
 
 ### Step 1 — Get the Code on GitHub
-
-If the repo isn't already on GitHub:
 
 ```bash
 cd "/Users/halcarrell/Documents/Claude/Projects/Crypto research/files"
@@ -43,41 +42,36 @@ git push -u origin main
 ### Step 2 — Deploy to Railway
 
 1. Go to **railway.com** → New Project → Deploy from GitHub → select `cryptoagent`
-2. Railway auto-detects Python and starts building
-3. Once deployed: click your service → **Settings** → **Networking** → set port to `8080` → **Generate Domain**
+2. Railway auto-detects Python and builds
+3. Click your service → **Settings** → **Networking** → port `8080` → **Generate Domain**
 
-**Add environment variables** (Settings → Variables):
+**Environment variables** (Settings → Variables):
 
 | Variable | Value |
 |---|---|
 | `CRYPTO_AGENT_DB` | `/data/crypto_agent.db` |
-| `WEBHOOK_AUTH_TOKEN` | Run `openssl rand -hex 32` in Terminal and paste the result |
+| `WEBHOOK_AUTH_TOKEN` | Run `openssl rand -hex 32` in Terminal — paste the result |
 | `DISCORD_WEBHOOK_URL` | Your Discord webhook URL (see Step 3) |
-| `PORTFOLIO_USD` | Your paper trading budget in dollars (e.g. `10000`) |
+| `PORTFOLIO_USD` | Your paper trading budget e.g. `10000` |
 
 **Add a volume** (Settings → Volumes):
-- Click **Add Volume** → Mount path: `/data`
-- This is where your database lives — it persists through restarts and redeploys
+- Add Volume → Mount path: `/data`
+- This is where your database lives — persists through restarts
 
-**Verify it's working:**
-Open your Railway domain in a browser. You should see:
+**Verify:**
+Open your Railway domain in a browser:
 ```json
 {"status": "ok", "service": "crypto-screener-webhook", "decider": "rules"}
 ```
-If you see that — your server is live. ✅
 
 ### Step 3 — Set Up Discord
 
-1. Open Discord → go to any channel (or create `#crypto-alerts`)
-2. Click the gear ⚙ next to the channel → **Integrations** → **Webhooks** → **New Webhook**
-3. Name it anything → click **Copy Webhook URL**
-4. Paste it into Railway as `DISCORD_WEBHOOK_URL`
+1. Discord → any channel → gear ⚙ → **Integrations** → **Webhooks** → **New Webhook**
+2. Copy the webhook URL → paste into Railway as `DISCORD_WEBHOOK_URL`
 
-> Never share this webhook URL — anyone with it can post to your channel.
+> Never share this URL publicly.
 
 ### Step 4 — Run the First Screener
-
-Before TradingView alerts can work, you need today's picks in the database:
 
 ```bash
 cd "/Users/halcarrell/Documents/Claude/Projects/Crypto research/files"
@@ -85,44 +79,44 @@ python3 crypto_agent.py fetch
 python3 crypto_agent.py report
 ```
 
-This takes 2–3 minutes. When it finishes, you'll see today's top 10 picks.
+Takes 2–3 minutes. Shows today's top 10 picks when done.
 
 ### Step 5 — Set Up TradingView
 
-**Add the Pine Script indicator (one-time):**
-1. Open TradingView → open any chart
+**Add the Pine Script indicator (one-time only):**
+1. TradingView → open any chart
 2. Click **Pine Editor** at the bottom
-3. Delete any existing code → paste the full contents of `screener_confirmation.pine`
-4. Click **Save** → give it a name (e.g. "Screener Confirmation") → click **Add to chart**
-5. Click the ⚙ gear next to the indicator name → set **Webhook auth token** to your `WEBHOOK_AUTH_TOKEN` from Railway → click **OK**
+3. Clear existing code → paste the full contents of `screener_confirmation.pine`
+4. Click **Save** → **Add to chart**
+5. Click the ⚙ gear on the indicator → set **Webhook auth token** to your `WEBHOOK_AUTH_TOKEN` from Railway → **OK**
 
-> You only need to do this once. The script is static — no daily updates needed.
+> The Pine Script is static — you never need to edit it again. The server handles all score checking.
 
 **Import today's watchlist:**
 
 ```bash
-python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange BINANCE_US
+python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES
 ```
 
-This creates a file like `watchlist_2026-05-11_binance.txt` filtered to coins available on Binance.US.
+This creates `watchlist_YYYY-MM-DD_binance.txt` filtered to coins available on Binance.US or Coinbase.
 
-In TradingView: Watchlist panel → **⋯ three dots** → **Import list** → select the file.
+In TradingView: Watchlist panel → **⋯** → **Import list** → select the file.
 
-> Always use watchlist import — never type a symbol like "SUI" manually. The import specifies the exact exchange (`BINANCE:SUIUSDT`) so there's no ambiguity.
+> Always use watchlist import — never type symbols manually. The file specifies the exact exchange (`BINANCE:INJUSDT`) so there's no ambiguity.
 
-**Create alerts (one per coin in your watchlist):**
-1. Open a chart for each coin (click it in your watchlist)
-2. Change timeframe to **4H**
-3. Right-click chart → **Add alert**
-4. Condition: `Screener Confirmation` → `any alert() function call`
-5. Click **Notifications** tab → check **Webhook URL** → paste your Railway domain + `/webhook`:
+**Create alerts (one per coin, done once per coin):**
+1. Open each chart from the watchlist → set timeframe to **4H**
+2. Right-click chart → **Add alert**
+3. Condition: `Screener Confirmation` → `any alert() function call`
+4. **Notifications** tab → check **Webhook URL** → paste:
    ```
    https://YOUR-SERVICE.up.railway.app/webhook
    ```
-6. Leave the **Message** field blank — the indicator fills it automatically
-7. Click **Create**
+5. Click **Create**
 
-Repeat for each coin. Alerts stay active permanently — no daily re-setup needed.
+> Alerts are permanent — they don't break when picks change. Only re-create if you add new coins to the watchlist.
+
+**TradingView plan note:** Webhooks require Essential plan ($15/mo) or higher. The webhook field appears on free plans but never fires.
 
 ---
 
@@ -132,18 +126,23 @@ Repeat for each coin. Alerts stay active permanently — no daily re-setup neede
 
 | When | What Happens |
 |---|---|
-| Daily 1pm UTC | Screener fetches 250 coins, scores them, posts top picks to Discord |
-| Daily 1pm UTC | ⚡ Strong Signals alert fires if any exceptional conditions detected |
-| Daily 1pm UTC | Health check email sent (if email is configured) |
+| Daily 1pm UTC | Screener fetches 250 coins, applies pump guard, posts picks to Discord |
+| Daily 1pm UTC | ⚡ Strong Signals alert fires if exceptional conditions detected |
+| Daily 1pm UTC | Health check email sent (if configured) |
 | Sunday 2pm UTC | Weight refitter runs, posts results to Discord |
 | Always on | Webhook server receives TradingView alerts 24/7 |
 
+Everything runs inside the single Railway web service — no separate cron jobs needed.
+
 ### Is Everything Healthy?
 
-**Check the server:**
-Open your Railway domain in a browser — should show `{"status": "ok"}`.
+**Server health:**
+```
+https://YOUR-SERVICE.up.railway.app/
+```
+Should return `{"status": "ok"}`.
 
-**Check Railway logs:**
+**Railway logs:**
 Railway dashboard → your service → **Logs** tab → look for:
 ```
 [scheduler] Started — daily@13:00 UTC
@@ -151,202 +150,181 @@ DB init OK
 Webhook server starting on :8080
 ```
 
-**Check today's picks:**
+**Today's picks:**
 ```bash
 python3 crypto_agent.py report
 ```
 
-### Setting Up Email Health Reports (Optional)
+### Email Health Reports (Optional)
 
-Add these to your Railway service variables:
+Add to Railway variables:
 
 | Variable | Value |
 |---|---|
 | `EMAIL_FROM` | Your Gmail address |
-| `EMAIL_TO` | Where to send the report (can be same address) |
-| `EMAIL_APP_PASSWORD` | A Gmail App Password — generate at **myaccount.google.com/apppasswords** → Other → name it "crypto screener" |
-
-> Use an App Password, not your regular Gmail password.
+| `EMAIL_TO` | Recipient (can be same as FROM) |
+| `EMAIL_APP_PASSWORD` | Gmail App Password — generate at **myaccount.google.com/apppasswords** |
 
 ### Tuning the Screener
 
-Edit `config.json` to adjust thresholds:
+Edit `config.json`:
 
 ```json
 {
   "strong_signals": {
-    "score_exceptional": 2.5,    ← lower to see more strong alerts
-    "volume_surge_score": 3.0,   ← lower to catch more volume spikes
-    "ath_within_pct": 20.0       ← raise to see more ATH candidates
+    "score_exceptional": 2.5,   ← lower to see more strong alerts
+    "volume_surge_score": 3.0,  ← lower to catch more volume spikes
+    "ath_within_pct": 20.0      ← raise to widen the ATH proximity window
   },
   "risk": {
-    "min_risk_reward_gross": 2.0, ← minimum R:R required to trade
-    "min_risk_reward_net": 1.6,   ← minimum R:R after 0.1% Binance fees
-    "max_position_pct": 5.0,      ← max % of portfolio per trade
-    "min_score": 0.5              ← minimum screener score to trade
+    "min_risk_reward_gross": 2.0,  ← minimum R:R before fees
+    "min_risk_reward_net":   1.6,  ← minimum R:R after 0.1% round-trip fees
+    "max_position_pct":      5.0,  ← max % of portfolio per trade
+    "min_score":             0.5   ← minimum screener score to trade
   }
 }
 ```
 
-After editing, push to GitHub — Railway redeploys automatically.
+Push to GitHub — Railway redeploys automatically.
 
-### Updating the Code
+### Pump Guard
 
+The screener automatically drops coins that have already pumped:
+- >60% move in 7 days
+- >25% move in 24 hours
+- Relative strength z-score >5
+
+These are late-stage pumps — entry risk outweighs opportunity.
+
+### Exchange Filtering
+
+Picks are filtered to coins tradeable on **US exchanges** — Binance.US or Coinbase. A coin passes if it's available on either platform.
+
+To see what would pass without the filter:
 ```bash
-cd "/Users/halcarrell/Documents/Claude/Projects/Crypto research/files"
-git add -A
-git commit -m "describe what you changed"
-git push
+python3 tv_integration.py watchlist --exchange BINANCE
 ```
 
-Railway rebuilds within a couple of minutes.
-
-### Applying New Screener Weights (After 30+ Days)
-
-Once you have enough paper trade data:
-
+To use only Binance.US:
 ```bash
-python3 weight_refitter.py status    # check if enough data
-python3 weight_refitter.py validate  # see if new weights improve results
-python3 weight_refitter.py refit     # generate new weights.json
+python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange BINANCE_US
 ```
 
-Review `weights.json` before applying. If the validate output shows consistent improvement, update the `WEIGHTS` dictionary in `crypto_agent.py`.
+### Applying New Score Weights (After 30+ Days)
+
+```bash
+python3 weight_refitter.py status    # check data sufficiency
+python3 weight_refitter.py validate  # walk-forward test: do new weights improve results?
+python3 weight_refitter.py refit     # generate weights.json
+```
+
+Review `weights.json` before manually updating `WEIGHTS` in `crypto_agent.py`.
 
 ### Common Problems
 
-**Server returns 502:**
-- Check Railway logs for Python errors
-- Confirm the volume is attached and `CRYPTO_AGENT_DB=/data/crypto_agent.db` is set
-- Redeploy from the Railway dashboard
-
-**TradingView webhook shows 404:**
-- URL has a trailing slash — it must end with `/webhook` not `/webhook/`
-- Check the exact URL in your alert settings
-
-**TradingView webhook shows 401:**
-- The auth token in the indicator settings doesn't match `WEBHOOK_AUTH_TOKEN` in Railway
-
-**Discord not pinging:**
-- Confirm `DISCORD_WEBHOOK_URL` is set in Railway variables
-- Check Railway logs for `[notifier]` error lines
-
-**"not in today's screener top 10" in webhook response:**
-- The screener hasn't run for today yet — wait for 1pm UTC or run `python3 crypto_agent.py fetch` manually
-
-**Picks look like pump-and-dump tokens:**
-- The pump guard filters coins up >60% in 7 days or >25% in 24 hours
-- Also filtered: coins not listed on Binance.US
-- If suspicious coins still appear, tighten `MAX_7D_CHANGE_PCT` in `crypto_agent.py`
+| Symptom | Fix |
+|---|---|
+| Server returns 502 | Check Railway logs; confirm volume attached; try redeploy |
+| TradingView webhook 404 | URL has trailing slash — must end with `/webhook` not `/webhook/` |
+| TradingView webhook 401 | Auth token in indicator settings doesn't match Railway `WEBHOOK_AUTH_TOKEN` |
+| No Discord pings | Confirm `DISCORD_WEBHOOK_URL` set in Railway; check logs for `[notifier]` errors |
+| "not in today's screener top 10" | Picks stale — wait for 1pm UTC or run `python3 crypto_agent.py fetch` |
+| Watchlist has only 2-3 coins | Normal on some days — Binance.US + Coinbase combined still excludes obscure tokens |
+| Pump tokens in picks | Pump guard is active (60%/7d, 25%/24h) — if still appearing, lower thresholds in `crypto_agent.py` |
+| Alerts disappeared in TradingView | Re-create them — alerts occasionally expire or get removed |
 
 ---
 
 ## Part 3 — User Guide
 
-### Your Morning Routine
+### Morning Routine (Takes 2 Minutes)
 
-**At 1pm UTC (8–9am US Eastern):**
+**Discord will ping you automatically at 1pm UTC** with:
+- Today's top picks and scores
+- ⚡ Strong Signals (if any)
 
-Discord automatically receives:
-1. **📊 Daily picks** — today's top coins with scores and rankings
-2. **⚡ Strong Signals** (if any) — exceptional conditions worth watching closely
-
-**What to do:**
-
+If picks changed from yesterday, update your watchlist:
 ```bash
-python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange BINANCE_US
+python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES
 ```
-
-Import the new watchlist into TradingView. Your existing alerts stay active — the new watchlist just updates which charts you're watching.
+Import the new file into TradingView.
 
 ### Understanding Your Discord Messages
 
-**Daily picks summary:**
+**Daily picks:**
 ```
-📊 Daily picks — 2026-05-11
-#1  SUIUSDT   score=+1.73
-#2  SEIUSDT   score=+1.23
-#3  ONDOUSDT  score=+1.07
-#4  ENSUSDT   score=+1.01
-```
-
-**Strong signal (when present):**
-```
-⚡ Strong Signals — 2026-05-11
-🔥 SUI — Exceptional Score
-   Composite score 3.16 — momentum +3.77, relative strength +4.23
-🏔️ ENS — Near ATH
-   Only 12% below all-time high — breakout candidate
+📊 Daily picks — 2026-05-13
+#1  INJUSDT   score=+3.09
+#2  TIAUSDT   score=+1.18
+#3  AKTUSDT   score=+1.15
 ```
 
-**Trade card (when a paper trade opens):**
+**Strong signal:**
 ```
-🟢 PAPER BUY — SUIUSDT (trade #4)
-$1.29 entry
-Stop loss  $1.22  (-5.4%)
-Take profit  $1.45  (+12.4%)
-R:R 2.3:1 • Confidence 100%
+⚡ Strong Signals — 2026-05-13
+🔥 INJ — Exceptional Score
+   Composite score 3.09 — momentum +2.87, relative strength +4.12
+🏔️ TIA — Near ATH
+   Only 14% below all-time high — breakout candidate
+```
+
+**Trade card when a paper trade opens:**
+```
+🟢 PAPER BUY — INJUSDT (trade #5)
+$5.09 entry
+Stop loss   $4.82  (-5.3%)
+Take profit $5.90  (+15.9%)
+R:R 3.0:1  •  Confidence 100%
 
 What to do:
-1️⃣ Open SUIUSDT on Binance.US
-2️⃣ BUY $500 at market (~387 units)
-3️⃣ Set stop-loss at $1.22
-4️⃣ Set take-profit at $1.45
+1️⃣  Open INJUSDT on Binance.US (or Coinbase)
+2️⃣  BUY $500 at market (~98 units)
+3️⃣  Set stop-loss at $4.82
+4️⃣  Set take-profit at $5.90
 ```
 
 **Trade closed:**
 ```
-✅ PAPER TRADE CLOSED — SUIUSDT (#4) — TARGET
-Entry $1.29 → Exit $1.45
-P&L +12.40% ≈ +$62
+✅ PAPER TRADE CLOSED — INJUSDT (#5) — TARGET
+Entry $5.09 → Exit $5.90
+P&L +15.9% ≈ +$80
 ```
 
 ### What the Scores Mean
-
-The composite score combines five factors:
 
 | Factor | Weight | What it measures |
 |---|---|---|
 | Momentum | 35% | Price strength vs the rest of the market |
 | Volume | 20% | Unusual volume relative to market cap |
-| Volatility | 15% | Moving more than peers (opportunity) |
-| Reversal | 15% | Distance from all-time low (recovery room) |
+| Volatility | 15% | Moving more than peers |
+| Reversal | 15% | Distance from all-time low |
 | Relative strength | 15% | Outperforming Bitcoin over 7 days |
 
 - Score **> 0.5** → qualifies for trading
-- Score **> 2.5** → exceptional, flagged as Strong Signal
+- Score **> 2.5** → exceptional — flagged as Strong Signal
 - Score **> 3.0** → very rare, pay close attention
 
 ### When Signals Fire
 
-The Pine Script indicator fires a webhook when all selected conditions are true at a 4H bar close:
-- RSI was below 30 in the last 5 bars (oversold bounce)
-- Price just crossed above VWAP (recovery confirmed)
-- Volume is 1.5× the 20-bar average (buying conviction)
-- EMA50 is above EMA200 (uptrend intact)
+The Pine Script fires on a 4H bar close when:
+- RSI was below 30 in the last 5 bars *(oversold bounce)*
+- Price crossed back above VWAP *(recovery confirmed)*
+- Volume is 1.5× the 20-bar average *(conviction)*
+- EMA50 > EMA200 *(uptrend intact)*
 
-**Most days will be quiet.** The system looks for high-quality setups, not constant action. 1–3 signals per week across your watchlist is normal.
+**Most days are quiet.** 1–3 signals per week is normal and expected. The server then checks: is it in today's picks? Is R:R good? Are picks fresh (< 36 hours old)?
 
-When a signal fires:
-- TradingView sends it to your Railway server
-- Server checks: is it in today's top 10? Is R:R ≥ 2:1? Are picks fresh?
-- If all checks pass → paper trade opens → Discord trade card
+**If signals are too rare:** uncheck **RSI bounce** in the indicator settings — this is the most restrictive filter in strong bull markets where coins don't dip to RSI 30.
 
-### Reading Your Performance Report
+### Performance Report
 
 ```bash
 python3 ai_trader.py report
 ```
 
-Shows:
-- **Hit rate** — what % of trades hit target vs stopped out
-- **Avg P&L** — average return per trade
-- **Weighted P&L** — accounts for position sizing
-- **Excursion stats** — how far trades moved in your favour (MFE) before closing
+Shows hit rate, average P&L, excursion stats (MFE/MAE), and decider activity.
 
-A healthy system after 30+ days: hit rate above 50%, positive avg P&L.
-
-Compare against BTC baseline in `crypto_agent.py report` — if your avg return beats BTC's return over the same period, the screener is adding real value.
+Compare your avg return against the BTC baseline in `python3 crypto_agent.py report`. If your picks beat BTC over 30+ samples, the screener is adding real value.
 
 ---
 
@@ -355,21 +333,48 @@ Compare against BTC baseline in `crypto_agent.py report` — if your avg return 
 | Task | Command |
 |---|---|
 | Run today's screener | `python3 crypto_agent.py fetch` |
-| View today's picks + performance | `python3 crypto_agent.py report` |
-| Export TradingView watchlist | `python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange BINANCE_US` |
+| View picks + performance | `python3 crypto_agent.py report` |
+| Export watchlist (US exchanges) | `python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES` |
 | View paper trade P&L | `python3 ai_trader.py report` |
 | Close open paper trades | `python3 ai_trader.py evaluate` |
-| Check weight refit data status | `python3 weight_refitter.py status` |
-| Check server health | Open your Railway domain in a browser |
+| Check weight refit data | `python3 weight_refitter.py status` |
+| Run full daily job manually | `python3 crypto_agent.py daily` |
+| Check server health | Open your Railway domain in browser |
+
+---
+
+## Architecture Overview
+
+```
+Railway Web Service (always on)
+├── Flask webhook server — receives TradingView alerts
+├── Background scheduler
+│   ├── Daily 13:00 UTC → crypto_agent.daily() → Discord + email
+│   └── Sunday 14:00 UTC → weight_refitter.refit() → Discord
+└── Shared SQLite volume at /data/crypto_agent.db
+
+TradingView
+└── Pine Script v6 indicator (static — never changes)
+    └── 4H bar close → webhook → Flask → decide → Discord
+
+Discord
+├── Daily picks summary
+├── ⚡ Strong signals
+├── 🟢 Trade opened card
+├── ✅/🛑 Trade closed card
+└── 🔴 Cron failure alert
+```
 
 ---
 
 ## Important Reminders
 
-- **Paper trading only.** No real money moves until you wire a CCXT exchange connection — that's a separate deliberate step.
-- **Validate for 30–60 days minimum** before considering live trading.
-- **Secrets stay in Railway.** Never commit `WEBHOOK_AUTH_TOKEN`, `DISCORD_WEBHOOK_URL`, or any API keys to GitHub.
-- **TradingView alerts can expire** — check the Alerts panel occasionally to confirm yours are still Active.
-- **The screener runs at 1pm UTC** = 9am US Eastern (EDT) / 6am US Pacific (PDT).
-- **BINANCE charts are fine for paper trading** on Binance.US — prices differ by <0.1%.
-- **No broker signup needed in TradingView** — we use alerts only, not TradingView's trade execution.
+- **Paper trading only.** No real money moves until you deliberately wire a CCXT exchange connection.
+- **Validate 30–60 days minimum** before considering live trading.
+- **Never commit secrets.** `WEBHOOK_AUTH_TOKEN`, `DISCORD_WEBHOOK_URL`, API keys → Railway only.
+- **TradingView alerts stay active permanently** — only re-create if you add new coins.
+- **No daily Pine Script updates needed** — the script is static; the server handles score logic.
+- **Screener runs at 1pm UTC** = 9am US Eastern / 6am US Pacific.
+- **BINANCE charts are fine** for paper trading on Binance.US — price difference < 0.1%.
+- **No broker signup in TradingView** — we use alerts only, not TradingView's trade execution.
+- **For live trading:** coins on Binance.US → trade there; coins only on Coinbase → trade there.
