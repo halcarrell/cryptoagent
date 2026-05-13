@@ -251,7 +251,7 @@ Import the new file into TradingView.
 
 ### Understanding Your Discord Messages
 
-**Daily picks:**
+**Daily picks** (filtered to US-tradeable coins only):
 ```
 📊 Daily picks — 2026-05-13
 #1  INJUSDT   score=+3.09
