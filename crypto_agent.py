@@ -539,14 +539,25 @@ def cmd_daily(conn):
         SELECT rank, symbol, composite_score, entry_price
         FROM picks WHERE pick_date = ? ORDER BY rank
     """, (today,))
-    picks = [
+    all_picks = [
         {"rank": r, "symbol": s, "composite_score": sc, "entry_price": pr}
         for r, s, sc, pr in cur.fetchall()
     ]
 
-    if not picks:
+    if not all_picks:
         warnings.append("No picks returned today — CoinGecko may be rate-limiting.")
         notify_cron_failure("picks empty", "No picks in DB after fetch.")
+
+    # Filter to coins actually tradeable on US exchanges for Discord/email
+    try:
+        from tv_integration import get_tradeable_pairs
+        tradeable = get_tradeable_pairs("US_EXCHANGES", "USDT")
+        picks = [p for p in all_picks if p["symbol"].upper() in tradeable] if tradeable else all_picks
+        if len(picks) < len(all_picks):
+            dropped = len(all_picks) - len(picks)
+            print(f"[daily] Filtered {dropped} non-US-tradeable picks from Discord summary.", flush=True)
+    except Exception:
+        picks = all_picks
 
     # 4. Coverage check
     coverage = {"1d": 0.0, "3d": 0.0, "7d": 0.0}
