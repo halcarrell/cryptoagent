@@ -1,20 +1,20 @@
 //@version=6
 // =============================================================
 // Screener Confirmation Signals
-//   - Confirms entries with technicals: RSI bounce, VWAP reclaim,
-//     volume spike, EMA trend
-//   - Fires a webhook alert with entry/stop/target to the Python server
-//   - Score checking is done SERVER-SIDE — no daily updates needed here
-//   - Set your webhook auth token once in the Alert / Webhook settings
+//   - Confirms momentum entries on screener picks
+//   - Fires webhook alert to Python server (score/R:R checked server-side)
+//   - Set auth token once in Alert/Webhook settings — never needs changing
 // =============================================================
 indicator("Screener Confirmation", overlay=true, max_labels_count=50)
 
 // ===== Confirmation Filters =====
 g_filt = "Confirmation Filters"
-use_rsi    = input.bool(true,  "RSI bounce (was oversold)", group=g_filt)
-use_vwap   = input.bool(true,  "VWAP reclaim",              group=g_filt)
-use_vol    = input.bool(true,  "Volume spike (1.5x avg)",   group=g_filt)
-use_trend  = input.bool(true,  "EMA50 > EMA200 trend",      group=g_filt)
+use_trend  = input.bool(true,  "EMA50 > EMA200 (uptrend)",       group=g_filt)
+use_vol    = input.bool(true,  "Volume spike (1.5× avg)",         group=g_filt)
+use_vwap   = input.bool(true,  "Above VWAP",                     group=g_filt)
+use_green  = input.bool(true,  "Green bar (close > open)",        group=g_filt)
+use_rsi    = input.bool(false, "RSI not overbought (< 70)",       group=g_filt,
+     tooltip="Off by default — only enable if you're getting too many signals")
 
 // ===== Risk Settings =====
 g_risk = "Risk"
@@ -27,24 +27,21 @@ auth_token = input.string("PASTE_YOUR_TOKEN_HERE", "Webhook auth token", group=g
      tooltip="Copy WEBHOOK_AUTH_TOKEN from Railway → your service → Variables")
 
 // ===== Indicators =====
-rsi_v            = ta.rsi(close, 14)
-rsi_was_oversold = ta.barssince(rsi_v < 30) < 5
-vwap_v           = ta.vwap(hlc3)
-crossed_vwap     = ta.crossover(close, vwap_v)
-vol_avg          = ta.sma(volume, 20)
-vol_spike        = volume > vol_avg * 1.5
-ema50            = ta.ema(close, 50)
-ema200           = ta.ema(close, 200)
-trend_up         = ema50 > ema200
-atr_v            = ta.atr(14)
+rsi_v   = ta.rsi(close, 14)
+vwap_v  = ta.vwap(hlc3)
+vol_avg = ta.sma(volume, 20)
+ema50   = ta.ema(close, 50)
+ema200  = ta.ema(close, 200)
+atr_v   = ta.atr(14)
 
 // ===== Signal Conditions =====
-rsi_ok   = not use_rsi   or rsi_was_oversold
-vwap_ok  = not use_vwap  or crossed_vwap
-vol_ok   = not use_vol   or vol_spike
-trend_ok = not use_trend or trend_up
+trend_ok = not use_trend or ema50 > ema200
+vol_ok   = not use_vol   or volume > vol_avg * 1.5
+vwap_ok  = not use_vwap  or close > vwap_v
+green_ok = not use_green or close > open
+rsi_ok   = not use_rsi   or rsi_v < 70
 
-long_entry = rsi_ok and vwap_ok and vol_ok and trend_ok
+long_entry = trend_ok and vol_ok and vwap_ok and green_ok and rsi_ok
 
 stop_price   = close - atr_v * atr_stop_mult
 target_price = close + atr_v * atr_target_mult
@@ -64,8 +61,6 @@ if long_entry
               style=label.style_label_up, yloc=yloc.belowbar)
 
 // ===== Webhook Alert =====
-// Server checks: is this coin in today's top 10? Score high enough? R:R valid?
-// Pine Script just confirms the technical setup and sends the prices.
 if long_entry
     payload = '{"auth":"'    + auth_token               + '"' +
               ',"symbol":"'  + syminfo.ticker            + '"' +
