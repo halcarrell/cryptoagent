@@ -606,13 +606,27 @@ def cmd_daily(conn):
     except Exception as e:
         print(f"[daily] Strong signal check failed: {e}", flush=True)
 
-    # 7. Discord daily picks summary + Pine Script snippet
+    # 7. Generate watchlist file + Discord daily picks summary
+    watchlist_symbols = []
     try:
-        notify_daily_picks(picks, today, warnings)
+        from tv_integration import export_watchlist, get_pine_score_string
+        export_watchlist(date=today, exchange="BINANCE", filter_exchange="US_EXCHANGES")
+        # Collect the TV symbols for the Discord message
+        from tv_integration import latest_picks, coingecko_to_tv_symbol, get_tradeable_pairs, SYMBOL_OVERRIDES, EXCHANGE_QUOTE
+        _, rows = latest_picks(today)
+        tradeable = get_tradeable_pairs("US_EXCHANGES", "USDT")
+        for coin_id, sym, score, price in rows:
+            base = SYMBOL_OVERRIDES.get(coin_id, sym).upper()
+            if not tradeable or base in tradeable:
+                watchlist_symbols.append(coingecko_to_tv_symbol(coin_id, sym, "BINANCE"))
+        print(f"[daily] Watchlist file written with {len(watchlist_symbols)} symbols.", flush=True)
+    except Exception as e:
+        print(f"[daily] Watchlist generation failed: {e}", flush=True)
+
+    try:
+        notify_daily_picks(picks, today, warnings, watchlist_symbols=watchlist_symbols)
     except Exception as e:
         print(f"[daily] Discord picks notify failed: {e}", flush=True)
-
-    # Pine score snippet removed — score logic moved fully server-side
 
     # 7. Email health report
     try:

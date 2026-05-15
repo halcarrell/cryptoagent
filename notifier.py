@@ -47,13 +47,9 @@ def _discord_post(payload: dict) -> None:
         print(f"[notifier] Discord post failed: {e}", flush=True)
 
 
-def notify_daily_picks(picks: list, date: str, warnings: list = None) -> None:
-    """Post today's top picks to Discord.
-
-    picks: list of dicts with keys symbol, composite_score, rank
-    date: YYYY-MM-DD
-    warnings: optional list of warning strings
-    """
+def notify_daily_picks(picks: list, date: str, warnings: list = None,
+                       watchlist_symbols: list = None) -> None:
+    """Post today's top picks to Discord, including TradingView symbols to set alerts on."""
     if not picks:
         return
 
@@ -62,6 +58,11 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None) -> None:
         for p in picks[:10]
     )
     description = f"```\n{rows}\n```"
+
+    if watchlist_symbols:
+        tv_list = "\n".join(watchlist_symbols)
+        description += f"\n**Set alerts on these in TradingView:**\n```\n{tv_list}\n```"
+
     if warnings:
         description += "\n⚠ " + "\n⚠ ".join(warnings)
 
@@ -72,7 +73,7 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None) -> None:
             "description": description,
             "footer": {
                 "text": f"Screener ran at {datetime.now(timezone.utc).strftime('%H:%M UTC')} • "
-                        f"Set alerts in TradingView for these symbols"
+                        f"Watchlist file also written to /data/watchlist_{date}_binance.txt"
             },
         }]
     })
