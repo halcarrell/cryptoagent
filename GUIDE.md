@@ -248,10 +248,16 @@ Review `weights.json` before manually updating `WEIGHTS` in `crypto_agent.py`.
 - Today's top picks and scores
 - ⚡ Strong Signals (if any)
 
-If picks changed from yesterday, update your watchlist:
+Run the single morning command to fetch fresh picks and generate the watchlist file:
 ```bash
+./morning.sh
+```
+Or manually in two steps:
+```bash
+python3 crypto_agent.py fetch
 python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES
 ```
+> Always run `fetch` first — `tv_integration.py` reads from your local database and will repeat stale data if you skip it.
 Import the new file into TradingView.
 
 ### Understanding Your Discord Messages
@@ -339,6 +345,7 @@ Compare your avg return against the BTC baseline in `python3 crypto_agent.py rep
 |---|---|
 | Run today's screener | `python3 crypto_agent.py fetch` |
 | View picks + performance | `python3 crypto_agent.py report` |
+| **Morning routine (fetch + watchlist)** | **`./morning.sh`** |
 | Export watchlist (US exchanges) | `python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES` |
 | View paper trade P&L | `python3 ai_trader.py report` |
 | Close open paper trades | `python3 ai_trader.py evaluate` |

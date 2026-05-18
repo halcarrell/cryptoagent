@@ -133,6 +133,22 @@ def latest_picks(date=None):
 
 
 def export_watchlist(date=None, exchange="BINANCE", out_path=None, filter_exchange=None):
+    # Warn if the picks in the local DB are stale
+    if date is None:
+        from datetime import datetime, timezone, timedelta
+        today = datetime.now(timezone.utc).date()
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(pick_date) FROM picks")
+        row = cur.fetchone()
+        conn.close()
+        latest = row[0] if row else None
+        if latest:
+            pick_date = datetime.strptime(latest, "%Y-%m-%d").date()
+            age = (today - pick_date).days
+            if age >= 1:
+                print(f"⚠  Local picks are {age} day(s) old ({latest}). "
+                      f"Run 'python3 crypto_agent.py fetch' first for today's picks.")
     """Write a TradingView-importable watchlist (one symbol per line).
 
     filter_exchange: if set, pre-flight checks the exchange's public API and
