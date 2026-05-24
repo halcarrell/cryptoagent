@@ -172,6 +172,7 @@ def notify_trade_opened(trade: dict) -> None:
     url          = _binance_us_url(sym)
     now          = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    reason_line = f"\n*{reason[:180]}*" if reason else ""
     description = (
         f"**{fmt(entry)}** entry\n"
         f"Stop loss  **{fmt(stop)}**  `{stop_pct:+.1f}%`\n"
@@ -181,8 +182,8 @@ def notify_trade_opened(trade: dict) -> None:
         f"1️⃣  [Open {sym} on Binance.US]({url})\n"
         f"2️⃣  {action_word}  **${dollar_size:,.0f}**  at market  (~{quantity:,.4g} units)\n"
         f"3️⃣  Set stop-loss at  **{fmt(stop)}**\n"
-        f"4️⃣  Set take-profit at  **{fmt(target)}**\n\n"
-        f"*{reason[:180]}*" if reason else ""
+        f"4️⃣  Set take-profit at  **{fmt(target)}**"
+        f"{reason_line}"
     )
 
     _discord_post({

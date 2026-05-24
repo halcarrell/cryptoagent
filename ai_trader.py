@@ -427,8 +427,8 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
             "entry_price": d.entry, "stop_price": d.stop, "target_price": d.target,
             "size_pct": d.size_pct, "confidence": d.confidence, "reasoning": d.reasoning,
         })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[notifier] Trade open notify failed for #{tid}: {e}", flush=True)
 
     return tid
 
