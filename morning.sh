@@ -1,14 +1,25 @@
 #!/bin/bash
-# Run this each morning to get today's picks and fresh watchlist file.
+# Daily local routine — run this each morning.
 cd "$(dirname "$0")"
 
-echo "Fetching today's picks..."
+echo "=== [1/5] Fetching today's picks ==="
 python3 crypto_agent.py fetch
 
 echo ""
-echo "Generating TradingView watchlist..."
+echo "=== [2/5] Evaluating realized returns ==="
+python3 crypto_agent.py evaluate
+
+echo ""
+echo "=== [3/5] Generating TradingView watchlist ==="
 python3 tv_integration.py watchlist --exchange BINANCE --filter-exchange US_EXCHANGES
 
 echo ""
-echo "Today's picks:"
-python3 crypto_agent.py report | head -20
+echo "=== [4/5] Today's picks + performance ==="
+python3 crypto_agent.py report
+
+echo ""
+echo "=== [5/5] Paper trade P&L ==="
+python3 ai_trader.py report
+
+echo ""
+echo "Done. Import the watchlist file into TradingView."
