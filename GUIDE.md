@@ -4,13 +4,14 @@
 
 Every day your system automatically:
 1. **Scans** the top 250 cryptocurrencies and scores them on momentum, volume, trend, and relative strength
-2. **Filters** out pump tokens (>60% 7d / >25% 24h moves), stablecoins, and coins not available on any US exchange
+2. **Filters** out pump tokens (>60% 7d / >25% 24h moves), stablecoins, near-$1 pegged tokens, and coins not available on any US exchange
 3. **Picks** the top coins and posts them to Discord
 4. **Flags** exceptional signals — unusual volume, near all-time highs, top scores
 5. **Watches** TradingView charts all day for technical confirmations
 6. **Receives** alerts from TradingView when a signal fires
 7. **Decides** whether to open a paper trade (checks R:R, screener score, data freshness)
 8. **Pings Discord** with a trade card when a paper trade opens or closes
+9. **Self-tests** the live server daily and posts a health report to Discord
 
 > **This is paper trading only.** No real money moves. Validate for 30–60 days before considering live trading.
 
@@ -129,7 +130,9 @@ In TradingView: Watchlist panel → **⋯** → **Import list** → select the f
 | Daily 1pm UTC | Screener fetches 250 coins, applies pump guard, posts picks to Discord |
 | Daily 1pm UTC | ⚡ Strong Signals alert fires if exceptional conditions detected |
 | Daily 1pm UTC | Health check email sent (if configured) |
+| Daily 2pm UTC | Automated test agent runs 5 live endpoint checks, posts pass/fail to Discord |
 | Sunday 2pm UTC | Weight refitter runs, posts results to Discord |
+| Monday 3pm UTC | Weekly enhancement agent reviews code, researches new data sources, posts report to Discord |
 | Always on | Webhook server receives TradingView alerts 24/7 |
 
 Everything runs inside the single Railway web service — no separate cron jobs needed.
@@ -188,7 +191,7 @@ Edit `config.json`:
     "min_risk_reward_gross": 2.0,  ← minimum R:R before fees
     "min_risk_reward_net":   1.6,  ← minimum R:R after 0.1% round-trip fees
     "max_position_pct":      5.0,  ← max % of portfolio per trade
-    "min_score":             0.5   ← minimum screener score to trade
+    "min_score":             1.2   ← minimum screener score to trade (z-score scale)
   }
 }
 ```
@@ -203,6 +206,14 @@ The screener automatically drops coins that have already pumped:
 - Relative strength z-score >5
 
 These are late-stage pumps — entry risk outweighs opportunity.
+
+### Stablecoin Filter
+
+Beyond name/symbol matching (USD, USDT, USDC, etc.), the screener also drops any coin where:
+- Price is between $0.90 and $1.10 **and**
+- 30-day price change is less than 3%
+
+This catches rebasing and pegged tokens that don't have "USD" in their name (e.g. RUSD, similar tokens).
 
 ### Exchange Filtering
 
@@ -244,7 +255,10 @@ Review `weights.json` before manually updating `WEIGHTS` in `crypto_agent.py`.
 | "not in today's screener top 10" | Picks stale — wait for 1pm UTC or run `python3 crypto_agent.py fetch` |
 | Watchlist has only 2-3 coins | Normal on some days — Binance.US + Coinbase combined still excludes obscure tokens |
 | Pump tokens in picks | Pump guard is active (60%/7d, 25%/24h) — if still appearing, lower thresholds in `crypto_agent.py` |
+| Stablecoin or pegged token in picks | Price-stability filter should catch it — check if price is near $1 with <3% 30d move |
+| No paper trades opening | Check `min_score` in `config.json` (currently 1.2) — if everything is "pass", screener score may be below threshold |
 | Alerts disappeared in TradingView | Re-create them — alerts occasionally expire or get removed |
+| Daily test agent not posting | Check claude.ai conversations list for the agent run output; confirm GitHub repo is public |
 
 ---
 
@@ -319,9 +333,11 @@ P&L +15.9% ≈ +$80
 | Reversal | 15% | Distance from all-time low |
 | Relative strength | 15% | Outperforming Bitcoin over 7 days |
 
-- Score **> 0.5** → qualifies for trading
+- Score **> 1.2** → qualifies for trading
 - Score **> 2.5** → exceptional — flagged as Strong Signal
 - Score **> 3.0** → very rare, pay close attention
+
+> Scores are cross-sectional z-scores — a score of +1.2 means the coin is outperforming ~88% of the universe on composite factors that day.
 
 ### When Signals Fire
 
@@ -377,12 +393,18 @@ TradingView
 └── Pine Script v6 indicator (static — never changes)
     └── 4H bar close → webhook → Flask → decide → Discord
 
+Claude.ai Scheduled Agents
+├── Daily 14:00 UTC → 5 live endpoint tests → Discord pass/fail
+└── Monday 15:00 UTC → code review + data source research → Discord report
+
 Discord
 ├── Daily picks summary
 ├── ⚡ Strong signals
 ├── 🟢 Trade opened card
 ├── ✅/🛑 Trade closed card
-└── 🔴 Cron failure alert
+├── 🔴 Cron failure alert
+├── Daily tests pass/fail
+└── 🔍 Weekly enhancement report
 ```
 
 ---
