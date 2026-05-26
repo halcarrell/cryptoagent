@@ -163,7 +163,15 @@ Add to Railway variables:
 |---|---|
 | `EMAIL_FROM` | Your Gmail address |
 | `EMAIL_TO` | Recipient (can be same as FROM) |
-| `EMAIL_APP_PASSWORD` | Gmail App Password — generate at **myaccount.google.com/apppasswords** |
+| `EMAIL_APP_PASSWORD` | Gmail App Password — see steps below |
+
+**To generate a Gmail App Password:**
+1. Make sure **2-Step Verification** is enabled on your Google account: [myaccount.google.com/security](https://myaccount.google.com/security) → *How you sign in to Google* → *2-Step Verification*
+2. Once 2SV is on, go to: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+3. Click **Create** → name it "Crypto Screener" → copy the 16-character password
+4. Paste that password (no spaces) as `EMAIL_APP_PASSWORD` in Railway
+
+> If the App Passwords page redirects you away, 2-Step Verification is not yet enabled — complete step 1 first.
 
 ### Tuning the Screener
 

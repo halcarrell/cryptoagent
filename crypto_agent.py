@@ -16,6 +16,7 @@ Data source: CoinGecko free public API (no key required, but rate limited).
 """
 
 import argparse
+import math
 import os
 import sqlite3
 import statistics
@@ -150,7 +151,15 @@ def fetch_top_coins(limit=TOP_N_UNIVERSE):
 def is_excluded(coin):
     name = (coin.get("name") or "").lower()
     sym = (coin.get("symbol") or "").lower()
-    return any(kw in name or kw == sym for kw in EXCLUDE_KEYWORDS)
+    if any(kw in name or kw == sym for kw in EXCLUDE_KEYWORDS):
+        return True
+    # Price-stability filter: exclude near-$1 tokens with <3% 30d move.
+    # Catches rebasing/pegged tokens that don't have "usd" in their name (e.g. RUSD).
+    price = coin.get("current_price") or 0
+    change_30d = abs(coin.get("price_change_percentage_30d_in_currency") or 0)
+    if 0.90 <= price <= 1.10 and change_30d < 3.0:
+        return True
+    return False
 
 
 # ---------- Signals ----------
@@ -177,19 +186,21 @@ def compute_signals(coins, btc_change_7d):
     change_24h   = [c.get("price_change_percentage_24h_in_currency") or 0 for c in eligible]
     abs_change_24h = [abs(x) for x in change_24h]
     vol_ratio    = [c["total_volume"] / c["market_cap"] for c in eligible]
-    atl_dist     = [c.get("atl_change_percentage") or 0 for c in eligible]
+    # Log-transform ATL distance before z-scoring: raw values span 100% to 4,700,000%
+    # (new coins vs BTC), making the distribution so skewed that all picks cluster at z≈0.
+    atl_dist_log = [math.log1p(max(0, c.get("atl_change_percentage") or 0)) for c in eligible]
 
     scored = []
     for c in eligible:
         m7  = c.get("price_change_percentage_7d_in_currency") or 0
         m24 = c.get("price_change_percentage_24h_in_currency") or 0
         vr  = c["total_volume"] / c["market_cap"]
-        atl = c.get("atl_change_percentage") or 0
+        atl_log = math.log1p(max(0, c.get("atl_change_percentage") or 0))
 
         momentum   = 0.5 * zscore(momentum_7d, m7) + 0.5 * zscore(change_24h, m24)
         volume     = zscore(vol_ratio, vr)
         volatility = zscore(abs_change_24h, abs(m24))
-        reversal   = -zscore(atl_dist, atl)  # closer to ATL = more recovery room
+        reversal   = -zscore(atl_dist_log, atl_log)  # closer to ATL = more recovery room
         rs         = (m7 - btc_change_7d) / 10  # rough scaling
 
         composite = (
