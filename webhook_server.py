@@ -157,6 +157,83 @@ def webhook():
     })
 
 
+@app.route("/picks", methods=["GET"])
+def get_picks():
+    """Return today's screener picks as JSON. Used by automation agents."""
+    if request.args.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        db = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT rank, symbol, composite_score, entry_price, pick_date
+            FROM picks WHERE pick_date = ? ORDER BY rank
+        """, (today,))
+        picks = [{"rank": r, "symbol": s, "score": round(sc, 3), "price": p, "date": d}
+                 for r, s, sc, p, d in cur.fetchall()]
+        conn.close()
+        return jsonify({"date": today, "count": len(picks), "picks": picks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/evaluate", methods=["POST"])
+def run_evaluate():
+    """Trigger paper trade evaluation (close trades that hit stop/target)."""
+    data = request.get_json(force=True, silent=True) or {}
+    if data.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        result = ai_trader.evaluate_open_trades()
+        return jsonify({"status": "ok", "result": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/status", methods=["GET"])
+def system_status():
+    """System health: picks freshness, open trades, recent alert activity."""
+    if request.args.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        db = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(pick_date), COUNT(*) FROM picks WHERE pick_date = ?", (today,))
+        row = cur.fetchone()
+        picks_today = row[1] or 0
+
+        cur.execute("SELECT COUNT(*) FROM picks WHERE pick_date = date(?, '-1 day')", (today,))
+        picks_yesterday = cur.fetchone()[0] or 0
+
+        open_trades = 0
+        recent_alerts = 0
+        try:
+            cur.execute("SELECT COUNT(*) FROM paper_trades WHERE status='open'")
+            open_trades = cur.fetchone()[0] or 0
+            cur.execute("""
+                SELECT COUNT(*) FROM alerts
+                WHERE received_at >= datetime('now', '-72 hours')
+            """)
+            recent_alerts = cur.fetchone()[0] or 0
+        except Exception:
+            pass
+        conn.close()
+        return jsonify({
+            "date": today,
+            "picks_today": picks_today,
+            "picks_yesterday": picks_yesterday,
+            "open_trades": open_trades,
+            "recent_alerts_72h": recent_alerts,
+            "picks_fresh": picks_today > 0,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _mask_secret(s: str) -> str:
     """Show 'configured (****abcd)' or '***unset/default***' — never the full value."""
     if not s or s == "CHANGE_ME":
