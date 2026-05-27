@@ -32,6 +32,9 @@ import requests
 # the local working dir for dev.
 DB_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 COINGECKO_API = "https://api.coingecko.com/api/v3"
+# Optional free Demo API key from coingecko.com — raises rate limit from ~10 to 30 req/min.
+# Set COINGECKO_API_KEY in Railway env vars (Settings → Variables).
+COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY", "")
 TOP_N_UNIVERSE = 250          # coins fetched (by market cap)
 TOP_N_PICKS = 10              # picks surfaced per day
 MIN_MARKET_CAP = 50_000_000   # liquidity floor: $50M
@@ -42,12 +45,12 @@ EXCLUDE_KEYWORDS = [
 ]
 
 # Pump guard: coins that have already moved this much are likely in a
-# late-stage pump — fade risk outweighs chase opportunity.
+# late-stage pump — fade risk outweighs chance opportunity.
 MAX_7D_CHANGE_PCT  = 60.0  # drop coins up > 60% in 7 days
 MAX_24H_CHANGE_PCT = 25.0  # drop coins up > 25% in 24 hours
 MAX_RS_SCORE       = 5.0   # drop coins with extreme relative-strength z-score
 EVAL_HORIZONS = [1, 3, 7]
-REQUEST_DELAY = 1.5  # seconds between API calls (free tier ~30/min)
+REQUEST_DELAY = 2.5  # seconds between API calls — increased for free-tier stability
 
 # Factor weights for the composite score. Tune these based on backtest.
 WEIGHTS = {
@@ -128,6 +131,21 @@ def init_db():
 
 
 # ---------- Data fetch ----------
+def _cg_get(url, params, max_retries=4):
+    """GET wrapper with exponential backoff on 429 rate-limit responses."""
+    headers = {"x-cg-demo-api-key": COINGECKO_API_KEY} if COINGECKO_API_KEY else {}
+    for attempt in range(max_retries):
+        r = requests.get(url, params=params, headers=headers, timeout=30)
+        if r.status_code == 429:
+            wait = 60 * (attempt + 1)  # 60s → 120s → 180s → 240s
+            print(f"  [CoinGecko] rate limited — waiting {wait}s (attempt {attempt+1}/{max_retries})", flush=True)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r
+    raise Exception("CoinGecko rate limit persisted after max retries")
+
+
 def fetch_top_coins(limit=TOP_N_UNIVERSE):
     coins = []
     per_page = 250
@@ -141,8 +159,7 @@ def fetch_top_coins(limit=TOP_N_UNIVERSE):
             "page": page,
             "price_change_percentage": "24h,7d,30d",
         }
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
+        r = _cg_get(url, params)
         coins.extend(r.json())
         time.sleep(REQUEST_DELAY)
     return coins[:limit]

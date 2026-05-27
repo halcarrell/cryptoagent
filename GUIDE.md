@@ -54,6 +54,9 @@ git push -u origin main
 | `WEBHOOK_AUTH_TOKEN` | Run `openssl rand -hex 32` in Terminal — paste the result |
 | `DISCORD_WEBHOOK_URL` | Your Discord webhook URL (see Step 3) |
 | `PORTFOLIO_USD` | Your paper trading budget e.g. `10000` |
+| `COINGECKO_API_KEY` | *(optional but recommended)* Free Demo API key — see note below |
+
+> **CoinGecko free Demo key:** go to [coingecko.com](https://coingecko.com) → sign up free → API → Demo → copy key. Raises the rate limit from ~10 to 30 req/min and prevents 429 errors during the daily fetch. No credit card needed.
 
 **Add a volume** (Settings → Volumes):
 - Add Volume → Mount path: `/data`
@@ -248,6 +251,7 @@ Review `weights.json` before manually updating `WEIGHTS` in `crypto_agent.py`.
 
 | Symptom | Fix |
 |---|---|
+| 🔴 Cron failure — fetch failed: 429 | CoinGecko rate limit hit. The screener will retry automatically (up to 4×, waits 60s between attempts). To prevent it permanently, add a free `COINGECKO_API_KEY` in Railway (see Setup). |
 | Server returns 502 | Check Railway logs; confirm volume attached; try redeploy |
 | TradingView webhook 404 | URL has trailing slash — must end with `/webhook` not `/webhook/` |
 | TradingView webhook 401 | Auth token in indicator settings doesn't match Railway `WEBHOOK_AUTH_TOKEN` |
