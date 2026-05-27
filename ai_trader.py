@@ -445,11 +445,13 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
 
     try:
         from notifier import notify_trade_opened
+        from news_fetcher import fetch_coin_news
+        news = fetch_coin_news(strip_quote(d.symbol), hours=24, max_items=3)
         notify_trade_opened({
             "trade_id": tid, "symbol": d.symbol, "side": d.side,
             "entry_price": d.entry, "stop_price": d.stop, "target_price": d.target,
             "size_pct": d.size_pct, "confidence": d.confidence, "reasoning": d.reasoning,
-        })
+        }, news=news)
     except Exception as e:
         print(f"[notifier] Trade open notify failed for #{tid}: {e}", flush=True)
 

@@ -651,8 +651,19 @@ def cmd_daily(conn):
     except Exception as e:
         print(f"[daily] Watchlist generation failed: {e}", flush=True)
 
+    news_by_symbol = {}
     try:
-        notify_daily_picks(picks, today, warnings, watchlist_symbols=watchlist_symbols)
+        from news_fetcher import fetch_picks_news
+        symbols = [p["symbol"] for p in picks[:10]]
+        news_by_symbol = fetch_picks_news(symbols, hours=24, max_per_coin=2)
+        if news_by_symbol:
+            print(f"[daily] News fetched for {len(news_by_symbol)} picks.", flush=True)
+    except Exception as e:
+        print(f"[daily] News fetch failed (non-fatal): {e}", flush=True)
+
+    try:
+        notify_daily_picks(picks, today, warnings, watchlist_symbols=watchlist_symbols,
+                           news_by_symbol=news_by_symbol)
     except Exception as e:
         print(f"[daily] Discord picks notify failed: {e}", flush=True)
 

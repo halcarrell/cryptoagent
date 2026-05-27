@@ -48,7 +48,8 @@ def _discord_post(payload: dict) -> None:
 
 
 def notify_daily_picks(picks: list, date: str, warnings: list = None,
-                       watchlist_symbols: list = None) -> None:
+                       watchlist_symbols: list = None,
+                       news_by_symbol: dict = None) -> None:
     """Post today's top picks to Discord, including TradingView symbols to set alerts on."""
     if not picks:
         return
@@ -66,17 +67,39 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None,
     if warnings:
         description += "\n⚠ " + "\n⚠ ".join(warnings)
 
-    _discord_post({
-        "embeds": [{
-            "title": f"📊 Daily picks — {date}",
-            "color": 0x3498DB,
-            "description": description,
-            "footer": {
-                "text": f"Screener ran at {datetime.now(timezone.utc).strftime('%H:%M UTC')} • "
-                        f"Watchlist file also written to /data/watchlist_{date}_binance.txt"
-            },
-        }]
-    })
+    fields = []
+    if news_by_symbol:
+        try:
+            from news_fetcher import format_news_lines
+            headline_lines = []
+            for p in picks[:10]:
+                sym = p["symbol"].upper()
+                coin_news = news_by_symbol.get(sym, [])
+                if coin_news:
+                    lines = format_news_lines(coin_news[:1])
+                    headline_lines.append(f"**{sym}** — {lines[0]}")
+            if headline_lines:
+                fields.append({
+                    "name": "📰 Headlines",
+                    "value": "\n".join(headline_lines[:10]),
+                    "inline": False,
+                })
+        except Exception:
+            pass
+
+    embed = {
+        "title": f"📊 Daily picks — {date}",
+        "color": 0x3498DB,
+        "description": description,
+        "footer": {
+            "text": f"Screener ran at {datetime.now(timezone.utc).strftime('%H:%M UTC')} • "
+                    f"Watchlist file also written to /data/watchlist_{date}_binance.txt"
+        },
+    }
+    if fields:
+        embed["fields"] = fields
+
+    _discord_post({"embeds": [embed]})
 
 
 def notify_strong_signals(signals: list, date: str) -> None:
@@ -142,7 +165,7 @@ def _binance_us_url(symbol: str) -> str:
     return f"https://www.binance.us/trade/pro/{base}_USDT"
 
 
-def notify_trade_opened(trade: dict) -> None:
+def notify_trade_opened(trade: dict, news: list = None) -> None:
     sym    = trade.get("symbol", "?")
     side   = (trade.get("side") or "long").upper()
     entry  = trade.get("entry_price") or 0
@@ -186,14 +209,30 @@ def notify_trade_opened(trade: dict) -> None:
         f"{reason_line}"
     )
 
-    _discord_post({
-        "embeds": [{
-            "title":       f"{action_emoji} PAPER {action_word} — {sym}  (trade #{tid})",
-            "color":       0x2ECC71 if side == "LONG" else 0xE74C3C,
-            "description": description,
-            "footer":      {"text": f"Portfolio ${PORTFOLIO_USD:,.0f}  •  Size {size:.1f}%  •  {now}"},
-        }]
-    })
+    fields = []
+    if news:
+        try:
+            from news_fetcher import format_news_lines
+            lines = format_news_lines(news[:3])
+            if lines:
+                fields.append({
+                    "name": "📰 Recent News",
+                    "value": "\n".join(lines),
+                    "inline": False,
+                })
+        except Exception:
+            pass
+
+    embed = {
+        "title":       f"{action_emoji} PAPER {action_word} — {sym}  (trade #{tid})",
+        "color":       0x2ECC71 if side == "LONG" else 0xE74C3C,
+        "description": description,
+        "footer":      {"text": f"Portfolio ${PORTFOLIO_USD:,.0f}  •  Size {size:.1f}%  •  {now}"},
+    }
+    if fields:
+        embed["fields"] = fields
+
+    _discord_post({"embeds": [embed]})
 
 
 def notify_trade_closed(trade: dict) -> None:
