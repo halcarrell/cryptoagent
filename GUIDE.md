@@ -55,7 +55,7 @@ git push -u origin main
 | `DISCORD_WEBHOOK_URL` | Your Discord webhook URL (see Step 3) |
 | `PORTFOLIO_USD` | Your paper trading budget e.g. `10000` |
 | `COINGECKO_API_KEY` | *(optional but recommended)* Free Demo API key — see note below |
-| `CRYPTOPANIC_API_KEY` | *(optional)* Free API key from [cryptopanic.com/developers](https://cryptopanic.com/developers) — enables news headlines in Discord trade cards and daily picks |
+| `TIINGO_API_KEY` | *(optional)* Free API key from [api.tiingo.com](https://api.tiingo.com) — enables ticker-specific news headlines in Discord trade cards and daily picks. Falls back to free RSS feeds (CoinDesk/CoinTelegraph/Decrypt) when not set. |
 
 > **CoinGecko free Demo key:** go to [coingecko.com](https://coingecko.com) → sign up free → API → Demo → copy key. Raises the rate limit from ~10 to 30 req/min and prevents 429 errors during the daily fetch. No credit card needed.
 
