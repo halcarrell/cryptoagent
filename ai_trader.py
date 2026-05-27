@@ -215,6 +215,29 @@ def fetch_funding_rate(symbol: str) -> Optional[float]:
         return None
 
 
+def fetch_live_price(symbol: str, exchange: str = "binance") -> Optional[float]:
+    """Spot price from Binance.US with Binance.com fallback."""
+    try:
+        import requests
+        sym = symbol.upper()
+        if not any(sym.endswith(q) for q in ("USDT", "USDC", "USD", "BUSD")):
+            sym += "USDT"
+        for base_url in ("https://api.binance.us", "https://api.binance.com"):
+            try:
+                r = requests.get(
+                    f"{base_url}/api/v3/ticker/price",
+                    params={"symbol": sym}, timeout=5,
+                )
+                if r.status_code == 200:
+                    price = r.json().get("price")
+                    return float(price) if price else None
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
 # ---------- Decision logic ----------
 def decide_trade(alert: dict) -> TradeDecision:
     """Rules-based decision. Replace with LLM for fancier reasoning."""
@@ -543,6 +566,8 @@ def evaluate_open_trades():
                 notify_trade_closed({
                     "trade_id": t["trade_id"], "symbol": t["symbol"],
                     "status": status, "pnl_pct": pnl,
+                    "entry_price": entry, "exit_price": exit_p,
+                    "size_pct": t["size_pct"],
                 })
             except Exception:
                 pass

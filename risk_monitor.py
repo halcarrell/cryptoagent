@@ -33,13 +33,14 @@ Programmatic:
 """
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
-DB_PATH = Path("crypto_agent.db")
+DB_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 
 # --- Risk parameters: the agent's "instructions". Tune to your tolerance. ---
 MAX_TOTAL_EXPOSURE  = 20.0
