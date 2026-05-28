@@ -61,13 +61,16 @@ _COIN_NAMES: dict = {
 }
 
 _BULLISH_RE = re.compile(
-    r"\b(surge|soar|rally|breakout|bullish|record|rise|jump|gain|"
-    r"breakthrough|milestone|partnership|upgrade|launch|high)\b",
+    r"\b(?:surge[sd]?|surging|soar[sd]?|rally|rallied|rallying|"
+    r"breakout|bullish|rise[sd]?|rising|jump[sed]?|gain[sed]?|"
+    r"breakthrough|milestone|partnership[s]?|upgrade[sd]?|launch(?:ed|es)?)\b",
     re.IGNORECASE,
 )
 _BEARISH_RE = re.compile(
-    r"\b(crash|drop|fall|bearish|decline|collapse|correction|dump|"
-    r"plunge|low|hack|exploit|ban|lawsuit|fine|warning|concern)\b",
+    r"\b(?:crash(?:ed|es)?|drop[sed]?|fall[sn]?|fell|bearish|decline[sd]?|"
+    r"collapse[sd]?|correction[s]?|dump[sed]?|sell.?off|plunge[sd]?|"
+    r"outflow[s]?|hack(?:ed|s)?|exploit(?:ed|s)?|ban(?:ned|s)?|"
+    r"lawsuit[s]?|fine[sd]?|warning[s]?|concern[s]?|shed[s]?)\b",
     re.IGNORECASE,
 )
 
