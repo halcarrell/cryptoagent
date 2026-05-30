@@ -35,5 +35,5 @@ agent.log
 .vscode/
 *.swp
 
-# Locally-sensitive: never commit weight files trained on private data
-weights.json
+# weights.json is committed as a baseline; the weekly refitter overwrites
+# /data/weights.json on the Railway volume, which takes precedence at runtime.

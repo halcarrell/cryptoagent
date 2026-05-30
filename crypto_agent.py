@@ -65,7 +65,11 @@ def _load_weights() -> dict:
         "rel_strength":  0.135,
         "decorrelation": 0.100,
     }
-    weights_path = Path(__file__).parent / "weights.json"
+    # Check the volume path (written by weight_refitter.py on Railway) first,
+    # then fall back to the app-directory copy shipped with the repo.
+    volume_path = DB_PATH.parent / "weights.json"
+    app_path    = Path(__file__).parent / "weights.json"
+    weights_path = volume_path if volume_path.exists() else app_path
     if not weights_path.exists():
         return defaults
     try:
