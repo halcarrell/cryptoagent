@@ -16,6 +16,7 @@ Data source: CoinGecko free public API (no key required, but rate limited).
 """
 
 import argparse
+import json
 import math
 import os
 import sqlite3
@@ -52,14 +53,44 @@ MAX_RS_SCORE       = 5.0   # drop coins with extreme relative-strength z-score
 EVAL_HORIZONS = [1, 3, 7]
 REQUEST_DELAY = 2.5  # seconds between API calls — increased for free-tier stability
 
-# Factor weights for the composite score. Tune these based on backtest.
-WEIGHTS = {
-    "momentum":   0.35,
-    "volume":     0.20,
-    "volatility": 0.15,
-    "reversal":   0.15,
-    "rel_strength": 0.15,
-}
+# Factor weights for the composite score.
+# Loaded from weights.json (written by weight_refitter.py) when available.
+# Decorrelation is injected at 10% with the remaining 5 factors renormalized to 90%.
+def _load_weights() -> dict:
+    defaults = {
+        "momentum":      0.315,
+        "volume":        0.180,
+        "volatility":    0.135,
+        "reversal":      0.135,
+        "rel_strength":  0.135,
+        "decorrelation": 0.100,
+    }
+    weights_path = Path(__file__).parent / "weights.json"
+    if not weights_path.exists():
+        return defaults
+    try:
+        with open(weights_path) as f:
+            data = json.load(f)
+        w = dict(data.get("weights", {}))
+        if not w:
+            return defaults
+        if "decorrelation" not in w:
+            scale = 0.90 / max(sum(w.values()), 1e-9)
+            w = {k: v * scale for k, v in w.items()}
+            w["decorrelation"] = 0.10
+        required = set(defaults.keys())
+        if not required.issubset(w.keys()):
+            return defaults
+        if abs(sum(w.values()) - 1.0) > 0.05:
+            return defaults
+        print(f"[weights] Loaded from weights.json (generated {data.get('generated_at', '?')[:10]})",
+              flush=True)
+        return w
+    except Exception as e:
+        print(f"[weights] Could not load weights.json ({e}) — using defaults", flush=True)
+        return defaults
+
+WEIGHTS = _load_weights()
 
 
 # ---------- Database ----------
@@ -120,12 +151,24 @@ def init_db():
         volatility REAL,
         reversal REAL,
         rel_strength REAL,
+        decorrelation REAL,
         PRIMARY KEY (pick_date, coin_id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_snap_coin ON snapshots(coin_id, snapshot_date);
     CREATE INDEX IF NOT EXISTS idx_fs_date ON factor_scores(pick_date);
     """)
+
+    # Migrate existing DBs: add new columns if they don't exist yet.
+    for table, col in [
+        ("picks",        "decorrelation_score"),
+        ("factor_scores","decorrelation"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     conn.commit()
     return conn
 
@@ -179,6 +222,67 @@ def is_excluded(coin):
     return False
 
 
+# ---------- BTC correlation ----------
+def compute_btc_correlations(conn, coin_ids: list) -> dict:
+    """Return {coin_id: 30d pearson correlation with BTC} for all coin_ids.
+    Single batch query — runs in O(coins) not O(coins²). Returns 0.0 for
+    coins with < 10 days of overlap with BTC snapshots."""
+    cur    = conn.cursor()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=32)).date().isoformat()
+
+    cur.execute("""
+        SELECT snapshot_date, price FROM snapshots
+        WHERE coin_id = 'bitcoin' AND snapshot_date >= ?
+        ORDER BY snapshot_date ASC
+    """, (cutoff,))
+    btc_rows = cur.fetchall()
+    btc_prices = {r[0]: r[1] for r in btc_rows if r[1]}
+    btc_dates  = sorted(btc_prices.keys())
+    if len(btc_dates) < 11:
+        return {}
+    btc_returns = {
+        btc_dates[i]: btc_prices[btc_dates[i]] / btc_prices[btc_dates[i - 1]] - 1
+        for i in range(1, len(btc_dates))
+    }
+
+    if not coin_ids:
+        return {}
+    placeholders = ",".join("?" for _ in coin_ids)
+    cur.execute(f"""
+        SELECT coin_id, snapshot_date, price FROM snapshots
+        WHERE coin_id IN ({placeholders}) AND snapshot_date >= ?
+        ORDER BY coin_id, snapshot_date ASC
+    """, (*coin_ids, cutoff))
+
+    coin_prices: dict = {}
+    for coin_id, snap_date, price in cur.fetchall():
+        if price:
+            coin_prices.setdefault(coin_id, {})[snap_date] = price
+
+    correlations = {}
+    for coin_id in coin_ids:
+        prices = coin_prices.get(coin_id, {})
+        s_dates = sorted(prices.keys())
+        if len(s_dates) < 11:
+            correlations[coin_id] = 0.0
+            continue
+        a = [prices[s_dates[i]] / prices[s_dates[i - 1]] - 1 for i in range(1, len(s_dates))]
+        b = [btc_returns.get(s_dates[i], None) for i in range(1, len(s_dates))]
+        pairs = [(ai, bi) for ai, bi in zip(a, b) if bi is not None]
+        if len(pairs) < 10:
+            correlations[coin_id] = 0.0
+            continue
+        a2, b2 = [p[0] for p in pairs], [p[1] for p in pairs]
+        ma, mb  = sum(a2) / len(a2), sum(b2) / len(b2)
+        cov     = sum((ai - ma) * (bi - mb) for ai, bi in zip(a2, b2))
+        var_a   = sum((ai - ma) ** 2 for ai in a2)
+        var_b   = sum((bi - mb) ** 2 for bi in b2)
+        denom   = (var_a * var_b) ** 0.5
+        correlations[coin_id] = cov / denom if denom > 0 else 0.0
+
+    return correlations
+
+
 # ---------- Signals ----------
 def zscore(values, x):
     if len(values) < 2:
@@ -188,7 +292,7 @@ def zscore(values, x):
     return 0.0 if sd == 0 else (x - mu) / sd
 
 
-def compute_signals(coins, btc_change_7d):
+def compute_signals(coins, btc_change_7d, correlations=None):
     eligible = [
         c for c in coins
         if c.get("market_cap") and c["market_cap"] >= MIN_MARKET_CAP
@@ -199,48 +303,54 @@ def compute_signals(coins, btc_change_7d):
         and abs(c.get("price_change_percentage_24h_in_currency") or 0) <= MAX_24H_CHANGE_PCT
     ]
 
-    momentum_7d  = [c.get("price_change_percentage_7d_in_currency")  or 0 for c in eligible]
-    change_24h   = [c.get("price_change_percentage_24h_in_currency") or 0 for c in eligible]
+    momentum_7d    = [c.get("price_change_percentage_7d_in_currency")  or 0 for c in eligible]
+    change_24h     = [c.get("price_change_percentage_24h_in_currency") or 0 for c in eligible]
     abs_change_24h = [abs(x) for x in change_24h]
-    vol_ratio    = [c["total_volume"] / c["market_cap"] for c in eligible]
+    vol_ratio      = [c["total_volume"] / c["market_cap"] for c in eligible]
     # Log-transform ATL distance before z-scoring: raw values span 100% to 4,700,000%
     # (new coins vs BTC), making the distribution so skewed that all picks cluster at z≈0.
-    atl_dist_log = [math.log1p(max(0, c.get("atl_change_percentage") or 0)) for c in eligible]
+    atl_dist_log   = [math.log1p(max(0, c.get("atl_change_percentage") or 0)) for c in eligible]
+    # BTC correlation for decorrelation factor — lower corr → higher score
+    corr_vals      = [correlations.get(c["id"], 0.0) if correlations else 0.0 for c in eligible]
 
     scored = []
     for c in eligible:
-        m7  = c.get("price_change_percentage_7d_in_currency") or 0
-        m24 = c.get("price_change_percentage_24h_in_currency") or 0
-        vr  = c["total_volume"] / c["market_cap"]
+        m7      = c.get("price_change_percentage_7d_in_currency") or 0
+        m24     = c.get("price_change_percentage_24h_in_currency") or 0
+        vr      = c["total_volume"] / c["market_cap"]
         atl_log = math.log1p(max(0, c.get("atl_change_percentage") or 0))
+        corr    = correlations.get(c["id"], 0.0) if correlations else 0.0
 
-        momentum   = 0.5 * zscore(momentum_7d, m7) + 0.5 * zscore(change_24h, m24)
-        volume     = zscore(vol_ratio, vr)
-        volatility = zscore(abs_change_24h, abs(m24))
-        reversal   = -zscore(atl_dist_log, atl_log)  # closer to ATL = more recovery room
-        rs         = (m7 - btc_change_7d) / 10  # rough scaling
+        momentum      = 0.5 * zscore(momentum_7d, m7) + 0.5 * zscore(change_24h, m24)
+        volume        = zscore(vol_ratio, vr)
+        volatility    = zscore(abs_change_24h, abs(m24))
+        reversal      = -zscore(atl_dist_log, atl_log)  # closer to ATL = more recovery room
+        rs            = (m7 - btc_change_7d) / 10       # rough scaling
+        decorrelation = -zscore(corr_vals, corr)         # lower BTC corr = higher score
 
         composite = (
-            WEIGHTS["momentum"]     * momentum +
-            WEIGHTS["volume"]       * volume +
-            WEIGHTS["volatility"]   * volatility +
-            WEIGHTS["reversal"]     * reversal +
-            WEIGHTS["rel_strength"] * rs
+            WEIGHTS["momentum"]       * momentum +
+            WEIGHTS["volume"]         * volume +
+            WEIGHTS["volatility"]     * volatility +
+            WEIGHTS["reversal"]       * reversal +
+            WEIGHTS["rel_strength"]   * rs +
+            WEIGHTS.get("decorrelation", 0.0) * decorrelation
         )
 
         scored.append({
-            "coin_id": c["id"],
-            "symbol": c["symbol"].upper(),
-            "name": c["name"],
-            "price": c["current_price"],
-            "change_24h": m24,
-            "change_7d": m7,
-            "composite_score": composite,
-            "momentum_score": momentum,
-            "volume_score": volume,
-            "volatility_score": volatility,
-            "reversal_score": reversal,
-            "rs_score": rs,
+            "coin_id":             c["id"],
+            "symbol":              c["symbol"].upper(),
+            "name":                c["name"],
+            "price":               c["current_price"],
+            "change_24h":          m24,
+            "change_7d":           m7,
+            "composite_score":     composite,
+            "momentum_score":      momentum,
+            "volume_score":        volume,
+            "volatility_score":    volatility,
+            "reversal_score":      reversal,
+            "rs_score":            rs,
+            "decorrelation_score": decorrelation,
         })
 
     # Drop extreme RS outliers — these are late-stage pumps, not early entries
@@ -273,8 +383,14 @@ def cmd_fetch(conn):
             c.get("price_change_percentage_30d_in_currency"),
             c.get("ath_change_percentage"), c.get("atl_change_percentage"),
         ))
+    conn.commit()  # commit snapshots before querying them for correlations
 
-    scored = compute_signals(coins, btc_7d)
+    # Compute BTC correlations from historical snapshots (now that today's are written)
+    coin_ids     = [c["id"] for c in coins if c.get("market_cap")]
+    correlations = compute_btc_correlations(conn, coin_ids)
+    print(f"  correlation data available for {len(correlations)} coins", flush=True)
+
+    scored = compute_signals(coins, btc_7d, correlations)
 
     # Persist per-coin factor scores for the full eligible universe.
     # weight_refitter.py needs this to learn factor → realized-return mapping.
@@ -282,12 +398,13 @@ def cmd_fetch(conn):
     for s in scored:
         cur.execute("""
             INSERT OR REPLACE INTO factor_scores
-            (pick_date, coin_id, symbol, momentum, volume, volatility, reversal, rel_strength)
-            VALUES (?,?,?,?,?,?,?,?)
+            (pick_date, coin_id, symbol, momentum, volume, volatility,
+             reversal, rel_strength, decorrelation)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (
             today, s["coin_id"], s["symbol"],
             s["momentum_score"], s["volume_score"], s["volatility_score"],
-            s["reversal_score"], s["rs_score"],
+            s["reversal_score"], s["rs_score"], s["decorrelation_score"],
         ))
 
     picks = scored[:TOP_N_PICKS]
@@ -301,12 +418,12 @@ def cmd_fetch(conn):
             INSERT OR REPLACE INTO picks
             (pick_date, rank, coin_id, symbol, entry_price, composite_score,
              momentum_score, volume_score, volatility_score, reversal_score, rs_score,
-             realized_1d, realized_3d, realized_7d)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             decorrelation_score, realized_1d, realized_3d, realized_7d)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             today, rank, p["coin_id"], p["symbol"], p["price"], p["composite_score"],
             p["momentum_score"], p["volume_score"], p["volatility_score"],
-            p["reversal_score"], p["rs_score"],
+            p["reversal_score"], p["rs_score"], p["decorrelation_score"],
             None, None, None,
         ))
     conn.commit()
@@ -606,7 +723,8 @@ def cmd_daily(conn):
         pass
 
     # 5. Paper trade stats
-    paper_stats = {"open": 0, "total_closed": 0, "hit_rate": 0.0, "avg_pnl": 0.0}
+    paper_stats = {"open": 0, "total_closed": 0, "hit_rate": 0.0, "avg_pnl": 0.0,
+                   "rolling_7d_pnl": None}
     try:
         cur.execute("SELECT COUNT(*) FROM paper_trades WHERE status='open'")
         paper_stats["open"] = cur.fetchone()[0] or 0
@@ -621,6 +739,14 @@ def cmd_daily(conn):
             paper_stats["total_closed"] = row[0]
             paper_stats["hit_rate"]     = round(row[1] or 0.0, 1)
             paper_stats["avg_pnl"]      = round(row[2] or 0.0, 2)
+        cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cur.execute("""
+            SELECT SUM(pnl_pct * size_pct / 100) FROM paper_trades
+            WHERE status != 'open' AND closed_at >= ?
+        """, (cutoff_7d,))
+        pnl_7d = cur.fetchone()[0]
+        if pnl_7d is not None:
+            paper_stats["rolling_7d_pnl"] = round(pnl_7d, 2)
     except Exception:
         pass
 
@@ -663,7 +789,7 @@ def cmd_daily(conn):
 
     try:
         notify_daily_picks(picks, today, warnings, watchlist_symbols=watchlist_symbols,
-                           news_by_symbol=news_by_symbol)
+                           news_by_symbol=news_by_symbol, paper_stats=paper_stats)
     except Exception as e:
         print(f"[daily] Discord picks notify failed: {e}", flush=True)
 

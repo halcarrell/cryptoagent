@@ -57,7 +57,8 @@ def _discord_post(payload: dict) -> None:
 
 def notify_daily_picks(picks: list, date: str, warnings: list = None,
                        watchlist_symbols: list = None,
-                       news_by_symbol: dict = None) -> None:
+                       news_by_symbol: dict = None,
+                       paper_stats: dict = None) -> None:
     """Post today's top picks to Discord, including TradingView symbols to set alerts on."""
     if not picks:
         return
@@ -76,6 +77,27 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None,
         description += "\n⚠ " + "\n⚠ ".join(warnings)
 
     fields = []
+
+    if paper_stats and (paper_stats.get("total_closed") or paper_stats.get("open")):
+        open_n   = paper_stats.get("open", 0)
+        closed_n = paper_stats.get("total_closed", 0)
+        hit      = paper_stats.get("hit_rate", 0.0)
+        avg_pnl  = paper_stats.get("avg_pnl", 0.0)
+        pnl_7d   = paper_stats.get("rolling_7d_pnl", None)
+        pnl_emoji = "📈" if (avg_pnl or 0) >= 0 else "📉"
+        stats_lines = [
+            f"Open: **{open_n}** • Closed: **{closed_n}**",
+            f"Hit rate: **{hit:.1f}%** • Avg P&L: **{avg_pnl:+.2f}%** {pnl_emoji}",
+        ]
+        if pnl_7d is not None:
+            w7_emoji = "📈" if pnl_7d >= 0 else "📉"
+            stats_lines.append(f"7d weighted P&L: **{pnl_7d:+.2f}%** {w7_emoji}")
+        fields.append({
+            "name": "📋 Paper Trading",
+            "value": "\n".join(stats_lines),
+            "inline": False,
+        })
+
     if news_by_symbol:
         try:
             from news_fetcher import format_news_lines
@@ -162,6 +184,21 @@ def notify_cron_failure(step: str, error: str) -> None:
                 {"name": "Step failed", "value": step,        "inline": False},
                 {"name": "Error",       "value": error[:500], "inline": False},
             ],
+            "footer": {"text": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
+        }]
+    })
+
+
+def notify_risk_rejection(symbol: str, reason: str) -> None:
+    """Orange Discord alert when the risk monitor blocks a paper trade."""
+    _discord_post({
+        "embeds": [{
+            "title": f"🛡 Risk block — {symbol}",
+            "color": 0xE67E22,
+            "description": (
+                f"A trade entry was blocked by the portfolio risk monitor.\n\n"
+                f"**Reason:** {reason}"
+            ),
             "footer": {"text": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
         }]
     })

@@ -157,8 +157,26 @@ def webhook():
     ai_trader.log_decision(alert_id, decision)
 
     trade_id = None
+    risk_block = None
     if decision.action == "enter":
-        trade_id = ai_trader.open_paper_trade(decision, alert_id)
+        try:
+            from risk_monitor import check_pre_trade_risk, log_rejection
+            approved, risk_reason = check_pre_trade_risk(decision)
+            if not approved:
+                log_rejection(alert_id, decision, risk_reason)
+                risk_block = risk_reason
+                print(f"[risk] #{alert_id} {data.get('symbol')}: BLOCKED — {risk_reason}",
+                      flush=True)
+                try:
+                    from notifier import notify_risk_rejection
+                    notify_risk_rejection(data.get("symbol", ""), risk_reason)
+                except Exception:
+                    pass
+            else:
+                trade_id = ai_trader.open_paper_trade(decision, alert_id)
+        except Exception as e:
+            print(f"[risk] Monitor error (bypassing): {e}", flush=True)
+            trade_id = ai_trader.open_paper_trade(decision, alert_id)
 
     print(f"[alert {alert_id}] {data.get('symbol')}: "
           f"{decision.action.upper()} - {decision.reasoning}")
@@ -166,6 +184,7 @@ def webhook():
     return jsonify({
         "alert_id": alert_id,
         "trade_id": trade_id,
+        "risk_block": risk_block,
         "decision": json.loads(decision.to_json()),
     })
 

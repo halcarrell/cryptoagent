@@ -238,6 +238,37 @@ def fetch_live_price(symbol: str, exchange: str = "binance") -> Optional[float]:
         return None
 
 
+def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -> list:
+    """4H OHLCV candles from Binance.US (Binance.com fallback) since since_ts.
+    Returns list of dicts with open_time (datetime), high, low, close.
+    Returns [] on any failure — callers fall back to daily snapshots."""
+    try:
+        import requests
+        sym = symbol.upper()
+        if not any(sym.endswith(q) for q in ("USDT", "USDC", "USD", "BUSD")):
+            sym += "USDT"
+        since_ms = int(since_ts.timestamp() * 1000)
+        params = {"symbol": sym, "interval": interval, "startTime": since_ms, "limit": 500}
+        for base_url in ("https://api.binance.us", "https://api.binance.com"):
+            try:
+                r = requests.get(f"{base_url}/api/v3/klines", params=params, timeout=10)
+                if r.status_code == 200:
+                    return [
+                        {
+                            "open_time": datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc),
+                            "high":  float(k[2]),
+                            "low":   float(k[3]),
+                            "close": float(k[4]),
+                        }
+                        for k in r.json()
+                    ]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return []
+
+
 # ---------- Decision logic ----------
 def decide_trade(alert: dict) -> TradeDecision:
     """Rules-based decision. Replace with LLM for fancier reasoning."""
@@ -539,18 +570,11 @@ def evaluate_open_trades_live():
 
 
 def evaluate_open_trades():
-    """Check open paper trades against the full snapshot path since open.
+    """Check open paper trades against Binance 4H candles since open.
 
-    For each open trade, walk daily snapshots from opened_at forward and:
-      - update MFE (max favorable excursion) and MAE (max adverse excursion)
-      - close the trade on the first day stop OR target was breached
-    Also writes MFE/MAE for trades that haven't closed yet, so the metrics
-    keep building day-by-day rather than only being captured at close.
-
-    Caveat: snapshots are daily, so MFE/MAE here is daily-resolution. A coin
-    that wicked through target intraday and closed back inside the range will
-    be undercounted. Acceptable trade-off for free CoinGecko data; revisit
-    with hourly/4h candles if the validation loop needs finer resolution.
+    Uses 4H candle high/low for accurate intraday stop/target detection and
+    MFE/MAE tracking. Falls back to daily CoinGecko snapshots when Binance
+    data is unavailable (e.g. coin not listed there).
     """
     conn = init_trading_tables()
     cur  = conn.cursor()
@@ -570,69 +594,82 @@ def evaluate_open_trades():
         opened_at_iso = t["opened_at"]
         try:
             opened_at = datetime.fromisoformat(opened_at_iso)
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             continue
-        opened_date = opened_at.date().isoformat()
 
-        # Pull all snapshots for this coin since the day it was opened.
-        cur.execute("""
-            SELECT snapshot_date, price FROM snapshots
-            WHERE symbol = ? AND snapshot_date >= ?
-            ORDER BY snapshot_date ASC
-        """, (base, opened_date))
-        path = cur.fetchall()
-        if not path:
-            continue
-
-        # Initialize MFE/MAE from entry — a freshly opened trade has zero
-        # excursion in either direction until a snapshot disagrees.
         mfe = t.get("mfe_price") or entry
         mae = t.get("mae_price") or entry
+        status, exit_p, exit_ts = None, None, None
 
-        status, exit_p, exit_date_iso = None, None, None
-        for snap_date, price in path:
-            if not price:
+        # ── Try Binance 4H candles (higher resolution, uses hi/lo per bar) ──
+        candles = fetch_binance_ohlcv(t["symbol"], opened_at, "4h")
+        if candles:
+            for c in candles:
+                hi, lo = c["high"], c["low"]
+                if side == "long":
+                    if hi > mfe: mfe = hi
+                    if lo < mae: mae = lo
+                    # Conservative: if stop and target both breached in same bar, take stop
+                    if lo <= stop_p:
+                        status, exit_p, exit_ts = "stopped", stop_p, c["open_time"]
+                        break
+                    if hi >= tgt_p:
+                        status, exit_p, exit_ts = "target", tgt_p, c["open_time"]
+                        break
+                else:
+                    if lo < mfe: mfe = lo
+                    if hi > mae: mae = hi
+                    if hi >= stop_p:
+                        status, exit_p, exit_ts = "stopped", stop_p, c["open_time"]
+                        break
+                    if lo <= tgt_p:
+                        status, exit_p, exit_ts = "target", tgt_p, c["open_time"]
+                        break
+        else:
+            # ── Fallback: daily CoinGecko snapshots ──────────────────────────
+            opened_date = opened_at.date().isoformat()
+            cur.execute("""
+                SELECT snapshot_date, price FROM snapshots
+                WHERE symbol = ? AND snapshot_date >= ?
+                ORDER BY snapshot_date ASC
+            """, (base, opened_date))
+            path = cur.fetchall()
+            if not path:
                 continue
-            # Track excursions in trade-direction terms.
-            if side == "long":
-                if price > mfe:
-                    mfe = price
-                if price < mae:
-                    mae = price
-            else:
-                if price < mfe:
-                    mfe = price
-                if price > mae:
-                    mae = price
-
-            # Stop/target check — first day it's breached wins. Tie-breaker:
-            # if both stop and target were inside the day's range we can't
-            # know which hit first from a single close price; be conservative
-            # and resolve as 'stopped' (the worse-for-us case).
-            if side == "long":
-                if price <= stop_p:
-                    status, exit_p, exit_date_iso = "stopped", stop_p, snap_date
-                    break
-                if price >= tgt_p:
-                    status, exit_p, exit_date_iso = "target", tgt_p, snap_date
-                    break
-            else:
-                if price >= stop_p:
-                    status, exit_p, exit_date_iso = "stopped", stop_p, snap_date
-                    break
-                if price <= tgt_p:
-                    status, exit_p, exit_date_iso = "target", tgt_p, snap_date
-                    break
+            for snap_date, price in path:
+                if not price:
+                    continue
+                if side == "long":
+                    if price > mfe: mfe = price
+                    if price < mae: mae = price
+                    if price <= stop_p:
+                        status, exit_p, exit_ts = "stopped", stop_p, snap_date
+                        break
+                    if price >= tgt_p:
+                        status, exit_p, exit_ts = "target", tgt_p, snap_date
+                        break
+                else:
+                    if price < mfe: mfe = price
+                    if price > mae: mae = price
+                    if price >= stop_p:
+                        status, exit_p, exit_ts = "stopped", stop_p, snap_date
+                        break
+                    if price <= tgt_p:
+                        status, exit_p, exit_ts = "target", tgt_p, snap_date
+                        break
 
         if status:
-            # Approximate close timestamp at end-of-day UTC of the snapshot
-            # that triggered. Daily data, so don't pretend at intraday precision.
-            try:
-                closed_at = datetime.fromisoformat(exit_date_iso).replace(
-                    hour=23, minute=59, second=59, tzinfo=timezone.utc
-                )
-            except (TypeError, ValueError):
-                closed_at = now
+            if isinstance(exit_ts, datetime):
+                closed_at = exit_ts
+            else:
+                try:
+                    closed_at = datetime.fromisoformat(exit_ts).replace(
+                        hour=23, minute=59, second=59, tzinfo=timezone.utc
+                    )
+                except (TypeError, ValueError):
+                    closed_at = now
             time_in_trade_h = (closed_at - opened_at).total_seconds() / 3600.0
             pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
             cur.execute("""
@@ -654,8 +691,6 @@ def evaluate_open_trades():
             except Exception as e:
                 print(f"[notifier] Trade close notify failed for #{t['trade_id']}: {e}", flush=True)
         else:
-            # Still open — keep MFE/MAE current so we always have the latest
-            # excursion stats available for in-flight inspection.
             cur.execute("""
                 UPDATE paper_trades SET mfe_price=?, mae_price=?
                 WHERE trade_id=?

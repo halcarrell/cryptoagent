@@ -389,28 +389,46 @@ Compare your avg return against the BTC baseline in `python3 crypto_agent.py rep
 ```
 Railway Web Service (always on)
 ├── Flask webhook server — receives TradingView alerts
+│   └── Risk monitor (pre-trade circuit breaker) — blocks trades that exceed
+│       exposure limits, hit correlation thresholds, or breach loss-streak rules
 ├── Background scheduler
 │   ├── Daily 13:00 UTC → crypto_agent.daily() → Discord + email
-│   └── Sunday 14:00 UTC → weight_refitter.refit() → Discord
+│   ├── Sunday 14:00 UTC → weight_refitter.refit() → Discord
+│   └── Every 4H @ :15 → evaluate_open_trades_live() → Discord close cards
 └── Shared SQLite volume at /data/crypto_agent.db
 
 TradingView
 └── Pine Script v6 indicator (static — never changes)
-    └── 4H bar close → webhook → Flask → decide → Discord
+    └── 4H bar close → webhook → Flask → risk check → decide → Discord
 
 Claude.ai Scheduled Agents
 ├── Daily 14:00 UTC → 5 live endpoint tests → Discord pass/fail
 └── Monday 15:00 UTC → code review + data source research → Discord report
 
 Discord
-├── Daily picks summary
+├── Daily picks summary (with paper trading stats + 7d P&L)
 ├── ⚡ Strong signals
-├── 🟢 Trade opened card
+├── 🟢 Trade opened card (with news headlines)
 ├── ✅/🛑 Trade closed card
+├── 🛡 Risk block alert (when circuit breaker fires)
 ├── 🔴 Cron failure alert
 ├── Daily tests pass/fail
 └── 🔍 Weekly enhancement report
 ```
+
+### Scoring Factors (6 total)
+
+| Factor | Default Weight | What it measures |
+|---|---|---|
+| Momentum | ~21% | Price strength vs the rest of the market |
+| Volume | ~25% | Unusual volume relative to market cap |
+| Volatility | ~21% | Moving more than peers |
+| Reversal | ~19% | Distance from all-time low |
+| Relative strength | ~4% | Outperforming Bitcoin over 7 days |
+| **Decorrelation** | **10%** | **Low 30d correlation with BTC — independent move** |
+
+> Weights are loaded from `weights.json` (written by the weekly refitter) when available.
+> The decorrelation factor is always injected at 10%, with the other 5 factors renormalized to 90%.
 
 ---
 
