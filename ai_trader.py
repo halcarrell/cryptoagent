@@ -443,10 +443,16 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
     conn.commit()
     conn.close()
 
+    # News fetch is best-effort — never allowed to block the Discord notification.
+    news = []
     try:
-        from notifier import notify_trade_opened
         from news_fetcher import fetch_coin_news
         news = fetch_coin_news(strip_quote(d.symbol), hours=24, max_items=3)
+    except Exception as e:
+        print(f"[news] Fetch failed for {d.symbol}: {e}", flush=True)
+
+    try:
+        from notifier import notify_trade_opened
         notify_trade_opened({
             "trade_id": tid, "symbol": d.symbol, "side": d.side,
             "entry_price": d.entry, "stop_price": d.stop, "target_price": d.target,
@@ -571,8 +577,8 @@ def evaluate_open_trades():
                     "entry_price": entry, "exit_price": exit_p,
                     "size_pct": t["size_pct"],
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[notifier] Trade close notify failed for #{t['trade_id']}: {e}", flush=True)
         else:
             # Still open — keep MFE/MAE current so we always have the latest
             # excursion stats available for in-flight inspection.

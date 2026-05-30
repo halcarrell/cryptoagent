@@ -38,11 +38,19 @@ EMAIL_APP_PASSWORD  = os.environ.get("EMAIL_APP_PASSWORD", "")
 
 def _discord_post(payload: dict) -> None:
     if not DISCORD_WEBHOOK_URL:
+        print("[notifier] DISCORD_WEBHOOK_URL not set — message not sent", flush=True)
         return
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
         if r.status_code not in (200, 204):
-            print(f"[notifier] Discord returned {r.status_code}: {r.text[:200]}", flush=True)
+            print(f"[notifier] Discord error {r.status_code}: {r.text[:200]}", flush=True)
+        else:
+            title = ""
+            try:
+                title = payload["embeds"][0].get("title", "")[:60]
+            except Exception:
+                pass
+            print(f"[notifier] Discord sent: {title}", flush=True)
     except Exception as e:
         print(f"[notifier] Discord post failed: {e}", flush=True)
 
