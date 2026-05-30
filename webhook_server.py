@@ -64,6 +64,16 @@ def _run_daily():
             pass
 
 
+def _run_live_eval():
+    """Every-4h live-price trade evaluation — sends Discord close cards intraday."""
+    try:
+        closed = ai_trader.evaluate_open_trades_live()
+        if closed:
+            print(f"[scheduler] Live eval closed {closed} trade(s).", flush=True)
+    except Exception as e:
+        print(f"[scheduler] Live eval failed: {e}", flush=True)
+
+
 def _run_refit():
     """Weekly walk-forward weight refit — runs Sundays 14:00 UTC."""
     print("[scheduler] Starting weekly refit...", flush=True)
@@ -97,8 +107,11 @@ def start_scheduler():
     scheduler.add_job(_run_daily, "cron", hour=13, minute=0, id="daily")
     # Weekly refit: 2pm UTC every Sunday
     scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=0, id="refit")
+    # Live trade evaluation: every 4h at :15 past each 4H bar close (0,4,8,12,16,20 UTC)
+    scheduler.add_job(_run_live_eval, "cron", hour="0,4,8,12,16,20", minute=15, id="live_eval")
     scheduler.start()
-    print("[scheduler] Started — daily@13:00 UTC, refit@Sunday 14:00 UTC", flush=True)
+    print("[scheduler] Started — daily@13:00 UTC, live-eval@every 4h, refit@Sunday 14:00 UTC",
+          flush=True)
 
     # Catch-up: if it's past 1pm UTC and no picks yet today, run immediately
     now = datetime.now(timezone.utc)
@@ -181,13 +194,17 @@ def get_picks():
 
 @app.route("/evaluate", methods=["POST"])
 def run_evaluate():
-    """Trigger paper trade evaluation (close trades that hit stop/target)."""
+    """Trigger paper trade evaluation. mode=live uses current Binance prices (default);
+    mode=snapshots uses daily CoinGecko snapshots."""
     data = request.get_json(force=True, silent=True) or {}
     if data.get("auth") != AUTH_TOKEN:
         return jsonify({"error": "unauthorized"}), 401
     try:
-        result = ai_trader.evaluate_open_trades()
-        return jsonify({"status": "ok", "result": result})
+        if data.get("mode") == "snapshots":
+            result = ai_trader.evaluate_open_trades()
+        else:
+            result = ai_trader.evaluate_open_trades_live()
+        return jsonify({"status": "ok", "closed": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

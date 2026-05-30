@@ -464,6 +464,80 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
     return tid
 
 
+def evaluate_open_trades_live():
+    """Check open paper trades against current live prices (Binance.US → Binance.com).
+
+    Runs every 4 hours via the scheduler so stop/target hits are caught intraday
+    rather than waiting for the next morning's daily snapshot run.
+    Skips trades opened less than 30 minutes ago to avoid closing on entry noise.
+    """
+    conn = init_trading_tables()
+    cur  = conn.cursor()
+    cur.execute("SELECT * FROM paper_trades WHERE status = 'open'")
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    closed = 0
+    now    = datetime.now(timezone.utc)
+    for t in rows:
+        # Don't evaluate trades that just opened — give the market 30 min to breathe.
+        try:
+            opened_at = datetime.fromisoformat(t["opened_at"])
+            if (now - opened_at).total_seconds() < 1800:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        last_price = fetch_live_price(t["symbol"])
+        if last_price is None:
+            continue
+
+        side   = t["side"]
+        entry  = t["entry_price"]
+        stop_p = t["stop_price"]
+        tgt_p  = t["target_price"]
+
+        status, exit_p = None, None
+        if side == "long":
+            if last_price <= stop_p:
+                status, exit_p = "stopped", stop_p
+            elif last_price >= tgt_p:
+                status, exit_p = "target", tgt_p
+        else:
+            if last_price >= stop_p:
+                status, exit_p = "stopped", stop_p
+            elif last_price <= tgt_p:
+                status, exit_p = "target", tgt_p
+
+        if status:
+            time_in_trade_h = (now - opened_at).total_seconds() / 3600.0
+            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
+            cur.execute("""
+                UPDATE paper_trades
+                SET status=?, closed_at=?, exit_price=?, pnl_pct=?, time_in_trade_hours=?
+                WHERE trade_id=?
+            """, (status, now.isoformat(), exit_p, pnl, time_in_trade_h, t["trade_id"]))
+            closed += 1
+            print(f"[live-eval] Trade #{t['trade_id']} {t['symbol']} {status.upper()} "
+                  f"@ {last_price} (entry {entry}), P&L {pnl:+.2f}%", flush=True)
+            try:
+                from notifier import notify_trade_closed
+                notify_trade_closed({
+                    "trade_id": t["trade_id"], "symbol": t["symbol"],
+                    "status": status, "pnl_pct": pnl,
+                    "entry_price": entry, "exit_price": exit_p,
+                    "size_pct": t["size_pct"],
+                })
+            except Exception as e:
+                print(f"[notifier] Trade close notify failed for #{t['trade_id']}: {e}", flush=True)
+
+    conn.commit()
+    conn.close()
+    if closed:
+        print(f"[live-eval] Closed {closed} trade(s) on live prices.", flush=True)
+    return closed
+
+
 def evaluate_open_trades():
     """Check open paper trades against the full snapshot path since open.
 
