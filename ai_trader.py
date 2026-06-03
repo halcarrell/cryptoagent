@@ -39,9 +39,10 @@ _SPOT_TAKER_FEE = _CFG.get("exchange", {}).get("spot", {}).get("taker_fee", 0.00
 _PERP_ENABLED   = _CFG.get("exchange", {}).get("perp", {}).get("enabled", True)
 
 # Risk parameters — net R:R accounts for round-trip fees (2 × taker fee)
-MIN_SCORE_TO_TRADE = _CFG.get("risk", {}).get("min_score", 0.5)
-MAX_POSITION_PCT   = _CFG.get("risk", {}).get("max_position_pct", 5.0)
-MIN_RISK_REWARD    = _CFG.get("risk", {}).get("min_risk_reward_gross", 2.0)
+MIN_SCORE_TO_TRADE  = _CFG.get("risk", {}).get("min_score", 0.5)
+MAX_SCORE_TO_TRADE  = _CFG.get("risk", {}).get("max_score", None)  # None = no cap
+MAX_POSITION_PCT    = _CFG.get("risk", {}).get("max_position_pct", 5.0)
+MIN_RISK_REWARD     = _CFG.get("risk", {}).get("min_risk_reward_gross", 2.0)
 MIN_RISK_REWARD_NET = _CFG.get("risk", {}).get("min_risk_reward_net", 1.6)
 
 
@@ -353,6 +354,12 @@ def decide_trade(alert: dict) -> TradeDecision:
                              0, 0.4,
                              f"Screener score {ctx['score']:.2f} below {MIN_SCORE_TO_TRADE}.")
 
+    if MAX_SCORE_TO_TRADE and ctx["score"] > MAX_SCORE_TO_TRADE:
+        return TradeDecision("pass", side, symbol, entry, stop, target,
+                             0, 0.3,
+                             f"Screener score {ctx['score']:.2f} above {MAX_SCORE_TO_TRADE} cap "
+                             f"— likely overextended/late-stage breakout.")
+
     # BTC regime gate — only after screener passes so we don't burn a Binance
     # request on every rejected signal. Fails open; short setups are exempt.
     if side == "long" and not btc_regime_bullish():
@@ -411,6 +418,7 @@ Hard rules:
 - Reject if not in screener top 10 (no context).
 - Reject if R:R < {MIN_RISK_REWARD}.
 - Reject if score < {MIN_SCORE_TO_TRADE}.
+- Reject if score > {MAX_SCORE_TO_TRADE} (overextended — late-stage breakout risk).
 - Size 0-{MAX_POSITION_PCT}% based on confidence.
 
 Soft priors (use judgment, don't auto-reject):
