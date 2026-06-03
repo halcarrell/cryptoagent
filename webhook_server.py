@@ -36,6 +36,11 @@ AUTH_TOKEN = os.environ.get("WEBHOOK_AUTH_TOKEN", "CHANGE_ME")
 USE_LLM = os.environ.get("USE_LLM_DECIDER", "false").lower() == "true"
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+# Epoch timestamp of the last time a streak/circuit-breaker risk alert was sent.
+# Prevents Discord flood when many TV signals fire during an active loss streak.
+_RISK_STREAK_ALERT_COOLDOWN = 4 * 3600  # 4 hours
+_last_streak_alert_ts: float = 0.0
+
 try:
     ai_trader.init_trading_tables().close()
     print("DB init OK", flush=True)
@@ -167,11 +172,23 @@ def webhook():
                 risk_block = risk_reason
                 print(f"[risk] #{alert_id} {data.get('symbol')}: BLOCKED — {risk_reason}",
                       flush=True)
-                try:
-                    from notifier import notify_risk_rejection
-                    notify_risk_rejection(data.get("symbol", ""), risk_reason)
-                except Exception:
-                    pass
+                # Streak and circuit-breaker blocks repeat on every signal during an active
+                # drawdown. Deduplicate Discord alerts to once per 4 hours.
+                global _last_streak_alert_ts
+                _streak_keywords = ("consecutive losses", "circuit breaker", "cooling off")
+                is_repeat_type   = any(kw in risk_reason for kw in _streak_keywords)
+                import time as _time
+                now_ts  = _time.time()
+                should_notify = (not is_repeat_type
+                                 or now_ts - _last_streak_alert_ts > _RISK_STREAK_ALERT_COOLDOWN)
+                if should_notify:
+                    try:
+                        from notifier import notify_risk_rejection
+                        notify_risk_rejection(data.get("symbol", ""), risk_reason)
+                        if is_repeat_type:
+                            _last_streak_alert_ts = now_ts
+                    except Exception:
+                        pass
             else:
                 trade_id = ai_trader.open_paper_trade(decision, alert_id)
         except Exception as e:

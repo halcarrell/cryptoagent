@@ -332,6 +332,13 @@ def _send_email(subject: str, html_body: str, text_body: str) -> None:
             server.login(EMAIL_FROM, EMAIL_APP_PASSWORD)
             server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
         print("[notifier] Health email sent.", flush=True)
+    except OSError as e:
+        if getattr(e, "errno", None) == 101 or "unreachable" in str(e).lower():
+            print("[notifier] Email skipped — Railway blocks outbound SMTP (port 587). "
+                  "Email health reports are disabled on Railway; use Discord instead.",
+                  flush=True)
+        else:
+            print(f"[notifier] Email failed: {e}", flush=True)
     except Exception as e:
         print(f"[notifier] Email failed: {e}", flush=True)
 

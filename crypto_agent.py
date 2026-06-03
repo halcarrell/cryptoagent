@@ -242,7 +242,7 @@ def compute_btc_correlations(conn, coin_ids: list) -> dict:
     btc_rows = cur.fetchall()
     btc_prices = {r[0]: r[1] for r in btc_rows if r[1]}
     btc_dates  = sorted(btc_prices.keys())
-    if len(btc_dates) < 11:
+    if len(btc_dates) < 5:   # need ≥ 4 return pairs; gracefully absent on new deploys
         return {}
     btc_returns = {
         btc_dates[i]: btc_prices[btc_dates[i]] / btc_prices[btc_dates[i - 1]] - 1
@@ -267,13 +267,13 @@ def compute_btc_correlations(conn, coin_ids: list) -> dict:
     for coin_id in coin_ids:
         prices = coin_prices.get(coin_id, {})
         s_dates = sorted(prices.keys())
-        if len(s_dates) < 11:
+        if len(s_dates) < 5:   # not enough history for this coin yet
             correlations[coin_id] = 0.0
             continue
         a = [prices[s_dates[i]] / prices[s_dates[i - 1]] - 1 for i in range(1, len(s_dates))]
         b = [btc_returns.get(s_dates[i], None) for i in range(1, len(s_dates))]
         pairs = [(ai, bi) for ai, bi in zip(a, b) if bi is not None]
-        if len(pairs) < 10:
+        if len(pairs) < 4:   # need ≥ 4 overlapping return days
             correlations[coin_id] = 0.0
             continue
         a2, b2 = [p[0] for p in pairs], [p[1] for p in pairs]
