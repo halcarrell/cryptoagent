@@ -31,6 +31,7 @@
     "min_risk_reward_net": 1.6,
     "max_position_pct": 5.0,
     "min_score": 1.2,
-    "max_score": 2.5
+    "max_score": 2.5,
+    "min_hold_hours": 24
   }
 }

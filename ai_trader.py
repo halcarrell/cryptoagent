@@ -44,6 +44,10 @@ MAX_SCORE_TO_TRADE  = _CFG.get("risk", {}).get("max_score", None)  # None = no c
 MAX_POSITION_PCT    = _CFG.get("risk", {}).get("max_position_pct", 5.0)
 MIN_RISK_REWARD     = _CFG.get("risk", {}).get("min_risk_reward_gross", 2.0)
 MIN_RISK_REWARD_NET = _CFG.get("risk", {}).get("min_risk_reward_net", 1.6)
+# Minimum hours a trade must be open before a stop can trigger. Cross-sectional
+# momentum has a 7-day optimal holding period; 24h prevents 4H noise from
+# closing a position before its thesis has time to develop.
+MIN_HOLD_HOURS      = _CFG.get("risk", {}).get("min_hold_hours", 24)
 
 
 @dataclass
@@ -574,10 +578,15 @@ def evaluate_open_trades_live():
     closed = 0
     now    = datetime.now(timezone.utc)
     for t in rows:
-        # Don't evaluate trades that just opened — give the market 30 min to breathe.
+        # Don't evaluate trades younger than MIN_HOLD_HOURS. Cross-sectional
+        # momentum needs time to develop; closing on the first 4H wiggle wastes
+        # the entry signal. Hard floor of 30 min to handle clock skew.
         try:
             opened_at = datetime.fromisoformat(t["opened_at"])
-            if (now - opened_at).total_seconds() < 1800:
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=timezone.utc)
+            min_secs = max(MIN_HOLD_HOURS * 3600, 1800)
+            if (now - opened_at).total_seconds() < min_secs:
                 continue
         except (TypeError, ValueError):
             continue
@@ -662,6 +671,9 @@ def evaluate_open_trades():
         except (TypeError, ValueError):
             continue
 
+        # Skip stop-check if under minimum hold time — let MFE/MAE update only.
+        under_min_hold = (now - opened_at).total_seconds() < MIN_HOLD_HOURS * 3600
+
         mfe = t.get("mfe_price") or entry
         mae = t.get("mae_price") or entry
         status, exit_p, exit_ts = None, None, None
@@ -674,22 +686,24 @@ def evaluate_open_trades():
                 if side == "long":
                     if hi > mfe: mfe = hi
                     if lo < mae: mae = lo
-                    # Conservative: if stop and target both breached in same bar, take stop
-                    if lo <= stop_p:
-                        status, exit_p, exit_ts = "stopped", stop_p, c["open_time"]
-                        break
-                    if hi >= tgt_p:
-                        status, exit_p, exit_ts = "target", tgt_p, c["open_time"]
-                        break
+                    if not under_min_hold:
+                        # Conservative: if stop and target both breached, take stop
+                        if lo <= stop_p:
+                            status, exit_p, exit_ts = "stopped", stop_p, c["open_time"]
+                            break
+                        if hi >= tgt_p:
+                            status, exit_p, exit_ts = "target", tgt_p, c["open_time"]
+                            break
                 else:
                     if lo < mfe: mfe = lo
                     if hi > mae: mae = hi
-                    if hi >= stop_p:
-                        status, exit_p, exit_ts = "stopped", stop_p, c["open_time"]
-                        break
-                    if lo <= tgt_p:
-                        status, exit_p, exit_ts = "target", tgt_p, c["open_time"]
-                        break
+                    if not under_min_hold:
+                        if hi >= stop_p:
+                            status, exit_p, exit_ts = "stopped", stop_p, c["open_time"]
+                            break
+                        if lo <= tgt_p:
+                            status, exit_p, exit_ts = "target", tgt_p, c["open_time"]
+                            break
         else:
             # ── Fallback: daily CoinGecko snapshots ──────────────────────────
             opened_date = opened_at.date().isoformat()
@@ -707,21 +721,23 @@ def evaluate_open_trades():
                 if side == "long":
                     if price > mfe: mfe = price
                     if price < mae: mae = price
-                    if price <= stop_p:
-                        status, exit_p, exit_ts = "stopped", stop_p, snap_date
-                        break
-                    if price >= tgt_p:
-                        status, exit_p, exit_ts = "target", tgt_p, snap_date
-                        break
+                    if not under_min_hold:
+                        if price <= stop_p:
+                            status, exit_p, exit_ts = "stopped", stop_p, snap_date
+                            break
+                        if price >= tgt_p:
+                            status, exit_p, exit_ts = "target", tgt_p, snap_date
+                            break
                 else:
                     if price < mfe: mfe = price
                     if price > mae: mae = price
-                    if price >= stop_p:
-                        status, exit_p, exit_ts = "stopped", stop_p, snap_date
-                        break
-                    if price <= tgt_p:
-                        status, exit_p, exit_ts = "target", tgt_p, snap_date
-                        break
+                    if not under_min_hold:
+                        if price >= stop_p:
+                            status, exit_p, exit_ts = "stopped", stop_p, snap_date
+                            break
+                        if price <= tgt_p:
+                            status, exit_p, exit_ts = "target", tgt_p, snap_date
+                            break
 
         if status:
             if isinstance(exit_ts, datetime):

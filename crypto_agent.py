@@ -308,6 +308,7 @@ def compute_signals(coins, btc_change_7d, correlations=None):
     ]
 
     momentum_7d    = [c.get("price_change_percentage_7d_in_currency")  or 0 for c in eligible]
+    momentum_30d   = [c.get("price_change_percentage_30d_in_currency") or 0 for c in eligible]
     change_24h     = [c.get("price_change_percentage_24h_in_currency") or 0 for c in eligible]
     abs_change_24h = [abs(x) for x in change_24h]
     vol_ratio      = [c["total_volume"] / c["market_cap"] for c in eligible]
@@ -320,12 +321,18 @@ def compute_signals(coins, btc_change_7d, correlations=None):
     scored = []
     for c in eligible:
         m7      = c.get("price_change_percentage_7d_in_currency") or 0
+        m30     = c.get("price_change_percentage_30d_in_currency") or 0
         m24     = c.get("price_change_percentage_24h_in_currency") or 0
         vr      = c["total_volume"] / c["market_cap"]
         atl_log = math.log1p(max(0, c.get("atl_change_percentage") or 0))
         corr    = correlations.get(c["id"], 0.0) if correlations else 0.0
 
-        momentum      = 0.5 * zscore(momentum_7d, m7) + 0.5 * zscore(change_24h, m24)
+        # 30d lookback is academically optimal for cross-sectional crypto momentum
+        # (Starkiller Capital 2022, SSRN 4675565). Blended 24h+7d+30d reduces
+        # sensitivity to single-day spikes while capturing persistent trends.
+        momentum      = (0.2 * zscore(change_24h, m24)
+                       + 0.4 * zscore(momentum_7d, m7)
+                       + 0.4 * zscore(momentum_30d, m30))
         volume        = zscore(vol_ratio, vr)
         volatility    = zscore(abs_change_24h, abs(m24))
         reversal      = -zscore(atl_dist_log, atl_log)  # closer to ATL = more recovery room
