@@ -18,7 +18,7 @@ import os
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -269,6 +269,44 @@ def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -
     return []
 
 
+# ---------- BTC regime gate ----------
+_btc_regime_cache: tuple = (0.0, True)  # (monotonic_ts, result) — 4H TTL
+
+
+def btc_regime_bullish() -> bool:
+    """True when BTC 4H EMA50 > EMA200 (uptrend intact).
+
+    Cached for 4 hours — same cadence as 4H bar closes, so the value only
+    updates when new market structure information is available.
+    Fails open (returns True) so a Binance outage never silently blocks trades.
+    """
+    global _btc_regime_cache
+    import time as _time
+    now = _time.monotonic()
+    ts, cached = _btc_regime_cache
+    if now - ts < 14_400:          # 4-hour cache
+        return cached
+    try:
+        since   = datetime.now(timezone.utc) - timedelta(days=36)  # ~216 bars
+        candles = fetch_binance_ohlcv("BTCUSDT", since, "4h")
+        closes  = [c["close"] for c in candles]
+        if len(closes) < 200:
+            return True            # not enough history yet — don't block
+        # Incremental EMA so we don't need numpy
+        k50, k200 = 2 / 51, 2 / 201
+        e50 = e200 = closes[0]
+        for p in closes[1:]:
+            e50  = p * k50  + e50  * (1 - k50)
+            e200 = p * k200 + e200 * (1 - k200)
+        result = e50 > e200
+        _btc_regime_cache = (now, result)
+        print(f"[regime] BTC 4H EMA50={e50:.2f} EMA200={e200:.2f} "
+              f"→ {'BULL ✓' if result else 'BEAR — blocking altcoin longs'}", flush=True)
+        return result
+    except Exception:
+        return True                # fail open
+
+
 # ---------- Decision logic ----------
 def decide_trade(alert: dict) -> TradeDecision:
     """Rules-based decision. Replace with LLM for fancier reasoning."""
@@ -315,6 +353,14 @@ def decide_trade(alert: dict) -> TradeDecision:
                              0, 0.4,
                              f"Screener score {ctx['score']:.2f} below {MIN_SCORE_TO_TRADE}.")
 
+    # BTC regime gate — only after screener passes so we don't burn a Binance
+    # request on every rejected signal. Fails open; short setups are exempt.
+    if side == "long" and not btc_regime_bullish():
+        return TradeDecision("pass", side, symbol, entry, stop, target,
+                             0, 0.2,
+                             "BTC 4H EMA50 < EMA200 — bearish market regime, "
+                             "skipping altcoin long to avoid headwind.")
+
     # Position sizing scales with confidence
     confidence = min(1.0, max(0.0, ctx["score"]))
     size_pct   = round(MAX_POSITION_PCT * confidence, 2)
@@ -337,6 +383,15 @@ def decide_trade_with_llm(alert: dict, anthropic_api_key: str) -> TradeDecision:
 
     base = strip_quote(alert.get("symbol", ""))
     ctx  = get_screener_context(base)
+
+    # BTC regime gate — skip the LLM call entirely if regime is bearish (saves API cost)
+    if alert.get("side", "long") == "long" and not btc_regime_bullish():
+        return TradeDecision("pass", alert.get("side"), alert.get("symbol", ""),
+                             alert.get("entry"), alert.get("stop"), alert.get("target"),
+                             0, 0.2,
+                             "BTC 4H EMA50 < EMA200 — bearish market regime, "
+                             "skipping altcoin long to avoid headwind.",
+                             decider="llm")
 
     # Reuse the funding rate that log_alert already cached on the dict if
     # present, otherwise fetch — so this works even if called outside the

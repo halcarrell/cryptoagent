@@ -287,6 +287,103 @@ def system_status():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/analysis", methods=["GET"])
+def score_analysis():
+    """Realized return stats bucketed by screener score + min_score recommendation.
+
+    Lets you answer: 'what score threshold actually predicts positive returns?'
+    Call: GET /analysis?auth=YOUR_TOKEN
+    """
+    if request.args.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        db  = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        cfg_path = Path(__file__).parent / "config.json"
+        import json as _json
+        current_min = 1.2
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                current_min = _json.load(f).get("risk", {}).get("min_score", 1.2)
+
+        conn = sqlite3.connect(db)
+        cur  = conn.cursor()
+
+        # Score-bucketed realized returns
+        cur.execute("""
+            SELECT
+                CASE
+                    WHEN composite_score < 1.5 THEN '1.0–1.5'
+                    WHEN composite_score < 2.0 THEN '1.5–2.0'
+                    WHEN composite_score < 2.5 THEN '2.0–2.5'
+                    WHEN composite_score < 3.0 THEN '2.5–3.0'
+                    ELSE '3.0+'
+                END AS bucket,
+                MIN(composite_score)                                              AS bucket_min,
+                COUNT(*)                                                          AS n,
+                ROUND(AVG(realized_1d), 2)                                        AS avg_1d,
+                ROUND(AVG(realized_3d), 2)                                        AS avg_3d,
+                ROUND(100.0 * SUM(CASE WHEN realized_3d > 0 THEN 1.0 ELSE 0 END)
+                      / MAX(COUNT(realized_3d), 1), 1)                            AS hit_rate_3d
+            FROM picks
+            WHERE realized_3d IS NOT NULL
+            GROUP BY bucket
+            ORDER BY bucket_min
+        """)
+        cols = [d[0] for d in cur.description]
+        buckets = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+        # Best threshold: lowest bucket with avg_3d > 0
+        recommendation = None
+        thresholds = {"1.0–1.5": 1.0, "1.5–2.0": 1.5, "2.0–2.5": 2.0,
+                      "2.5–3.0": 2.5, "3.0+": 3.0}
+        for b in buckets:
+            if (b.get("avg_3d") or 0) > 0 and b["n"] >= 5:
+                t = thresholds.get(b["bucket"])
+                if t and (recommendation is None or t < recommendation):
+                    recommendation = t
+
+        # Paper trade outcome breakdown
+        cur.execute("""
+            SELECT status, COUNT(*), ROUND(AVG(pnl_pct), 2),
+                   ROUND(AVG(time_in_trade_hours), 1)
+            FROM paper_trades WHERE status != 'open'
+            GROUP BY status
+        """)
+        trade_rows = [{"status": r[0], "n": r[1], "avg_pnl": r[2],
+                       "avg_hours": r[3]} for r in cur.fetchall()]
+
+        # Current BTC regime
+        try:
+            regime = "bull" if ai_trader.btc_regime_bullish() else "bear"
+        except Exception:
+            regime = "unknown"
+
+        conn.close()
+
+        msg = None
+        if recommendation is not None:
+            if recommendation > current_min:
+                msg = (f"Raise min_score from {current_min} to {recommendation} — "
+                       f"picks below {recommendation} have averaged negative 3d returns.")
+            elif recommendation < current_min:
+                msg = (f"Could lower min_score from {current_min} to {recommendation} "
+                       f"for more trades without hurting avg return.")
+            else:
+                msg = f"min_score={current_min} looks well-calibrated."
+        else:
+            msg = "Not enough closed picks per bucket yet — check back after 30+ days."
+
+        return jsonify({
+            "current_min_score": current_min,
+            "btc_regime":        regime,
+            "recommendation":    msg,
+            "score_buckets":     buckets,
+            "paper_trades":      trade_rows,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _mask_secret(s: str) -> str:
     """Show 'configured (****abcd)' or '***unset/default***' — never the full value."""
     if not s or s == "CHANGE_ME":
