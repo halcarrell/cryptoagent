@@ -41,6 +41,17 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
 _RISK_STREAK_ALERT_COOLDOWN = 4 * 3600  # 4 hours
 _last_streak_alert_ts: float = 0.0
 
+# Cooldown for "signal received but not traded" pass notifications.
+# Regime and score-cap blocks repeat on every TV signal while the condition holds —
+# we notify once per 4 hours so the user knows why they're not getting trade cards.
+_PASS_NOTIFY_COOLDOWN = 4 * 3600
+_last_pass_alert_ts:  float = 0.0
+# Reasons worth notifying about (user fired a signal but server declined to trade)
+_PASS_NOTIFY_KEYWORDS = (
+    "bearish market regime", "EMA50 < EMA200",
+    "above", "cap", "overextended", "bearish regime",
+)
+
 try:
     ai_trader.init_trading_tables().close()
     print("DB init OK", flush=True)
@@ -219,6 +230,26 @@ def webhook():
         except Exception as e:
             print(f"[risk] Monitor error (bypassing): {e}", flush=True)
             trade_id = ai_trader.open_paper_trade(decision, alert_id)
+
+    elif decision.action == "pass":
+        # Notify Discord when the server skips a signal for a notable reason so
+        # the user doesn't wonder why no trade card appeared. Cooldown prevents
+        # channel floods during sustained bear regimes or loss streaks.
+        pass_reason = decision.reasoning or ""
+        if any(kw in pass_reason for kw in _PASS_NOTIFY_KEYWORDS):
+            import time as _time
+            global _last_pass_alert_ts
+            now_ts = _time.time()
+            if now_ts - _last_pass_alert_ts > _PASS_NOTIFY_COOLDOWN:
+                try:
+                    from notifier import notify_signal_passed
+                    notify_signal_passed(
+                        data.get("symbol", ""), pass_reason,
+                        side=data.get("side", "long"),
+                    )
+                    _last_pass_alert_ts = now_ts
+                except Exception:
+                    pass
 
     print(f"[alert {alert_id}] {data.get('symbol')}: "
           f"{decision.action.upper()} - {decision.reasoning}")

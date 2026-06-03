@@ -215,6 +215,27 @@ def notify_risk_rejection(symbol: str, reason: str) -> None:
     })
 
 
+def notify_signal_passed(symbol: str, reason: str, side: str = "long") -> None:
+    """Grey Discord card when a signal fires but the server skips the trade.
+
+    Sent at most once per 4 hours (cooldown enforced in webhook_server.py)
+    so repeated signals in the same bear stretch don't flood the channel.
+    """
+    side_emoji = "🟢" if (side or "long") == "long" else "🔴"
+    _discord_post({
+        "embeds": [{
+            "title": f"⏸ Signal skipped — {symbol}",
+            "color": 0x95A5A6,
+            "description": (
+                f"{side_emoji} **{(side or 'long').upper()}** signal received but not traded.\n\n"
+                f"**Reason:** {reason}\n\n"
+                f"*No action needed — the system will re-evaluate on the next signal.*"
+            ),
+            "footer": {"text": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
+        }]
+    })
+
+
 def _binance_us_url(symbol: str) -> str:
     """Build a direct Binance.US trading page link for a symbol like SOLUSDT."""
     base = symbol.upper().replace("USDT", "").replace("USD", "")
