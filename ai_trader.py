@@ -359,13 +359,43 @@ def decide_trade(alert: dict) -> TradeDecision:
                              f"Screener score {ctx['score']:.2f} below {MIN_SCORE_TO_TRADE}.")
 
     if MAX_SCORE_TO_TRADE and ctx["score"] > MAX_SCORE_TO_TRADE:
+        # Overextended in bear regime → flip to reversal short instead of blocking.
+        # Live data: 2.5+ scores averaged -6.78% 3d return; Pine is already showing
+        # distribution conditions (RSI overbought, vol spike, red bar). Rather than
+        # discarding the signal, ride the reversal.
+        regime_bear = not btc_regime_bullish()
+        if side == "long" and regime_bear:
+            # Mirror ATR distances to create short stop/target
+            atr_stop_dist   = abs(entry - stop)    # = ATR * stop_mult
+            atr_target_dist = abs(target - entry)  # = ATR * target_mult
+            s_stop   = entry + atr_stop_dist        # stop ABOVE entry for short
+            s_target = entry - atr_target_dist      # target BELOW entry for short
+            s_rr     = atr_target_dist / atr_stop_dist if atr_stop_dist > 0 else 0
+            if s_rr >= MIN_RISK_REWARD:
+                confidence = min(1.0, (ctx["score"] - MAX_SCORE_TO_TRADE) / 0.5)
+                size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)  # half-size — higher risk
+                return TradeDecision(
+                    "enter", "short", symbol, entry, s_stop, s_target,
+                    size_pct, confidence,
+                    f"{base} score={ctx['score']:.2f} exceeds {MAX_SCORE_TO_TRADE} cap "
+                    f"in bear regime — reversal short. R:R={s_rr:.1f}:1, "
+                    f"live data shows 2.5+ scores avg -6.78% 3d return.",
+                )
+        # Not in bear regime or already a short signal: block the overextended long
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.3,
                              f"Screener score {ctx['score']:.2f} above {MAX_SCORE_TO_TRADE} cap "
                              f"— likely overextended/late-stage breakout.")
 
-    # BTC regime gate — only after screener passes so we don't burn a Binance
-    # request on every rejected signal. Fails open; short setups are exempt.
+    # Pine Script short signals require bear regime confirmation.
+    # Server-generated reversal shorts (above) already checked this.
+    if side == "short" and btc_regime_bullish():
+        return TradeDecision("pass", side, symbol, entry, stop, target,
+                             0, 0.2,
+                             "BTC regime is bullish — skipping short signal.")
+
+    # BTC regime gate for longs — only after screener passes so we don't burn a
+    # Binance request on every rejected signal. Short setups are exempt.
     if side == "long" and not btc_regime_bullish():
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.2,

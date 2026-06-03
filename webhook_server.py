@@ -133,17 +133,42 @@ def health():
             "decider": "llm" if USE_LLM else "rules"}
 
 
+def _extract_payload(raw_bytes: bytes) -> dict:
+    """Parse the webhook body.
+
+    Supports two formats:
+    1. Pure JSON  — legacy and LLM-generated webhooks
+    2. Text + JSON — Pine Script v2+ format where the human-readable header
+       (shown in TradingView mobile notifications) precedes the JSON block:
+         🟢 LONG INJUSDT @ 7.10  SL -5.0%  TP +15.0%  R:R 3.0:1  RSI 45.2
+         {"auth":"...","symbol":"INJUSDT",...}
+    """
+    import re
+    text = raw_bytes.decode("utf-8", errors="replace").strip()
+    # Try pure JSON first (fastest, covers legacy payloads)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find the outermost {...} block — handles header + JSON on separate lines
+    m = re.search(r'(\{.*\})', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # TradingView sends raw JSON or text
-    data = request.get_json(force=True, silent=True)
-    if not data and request.data:
-        try:
-            data = json.loads(request.data)
-        except Exception:
-            return jsonify({"error": "invalid JSON"}), 400
+    data = {}
+    if request.data:
+        data = _extract_payload(request.data)
+    elif request.json:
+        data = request.json
     if not data:
-        return jsonify({"error": "empty payload"}), 400
+        return jsonify({"error": "empty or unparseable payload"}), 400
 
     if data.get("auth") != AUTH_TOKEN:
         return jsonify({"error": "unauthorized"}), 401

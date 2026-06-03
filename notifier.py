@@ -58,7 +58,8 @@ def _discord_post(payload: dict) -> None:
 def notify_daily_picks(picks: list, date: str, warnings: list = None,
                        watchlist_symbols: list = None,
                        news_by_symbol: dict = None,
-                       paper_stats: dict = None) -> None:
+                       paper_stats: dict = None,
+                       short_watch: list = None) -> None:
     """Post today's top picks to Discord, including TradingView symbols to set alerts on."""
     if not picks:
         return
@@ -95,6 +96,16 @@ def notify_daily_picks(picks: list, date: str, warnings: list = None,
         fields.append({
             "name": "📋 Paper Trading",
             "value": "\n".join(stats_lines),
+            "inline": False,
+        })
+
+    if short_watch:
+        short_lines = " · ".join(
+            f"**{s['symbol']}** `{s['score']:+.2f}`" for s in short_watch[:5]
+        )
+        fields.append({
+            "name": "📉 Short Watch (weakest scores today)",
+            "value": short_lines + "\n*Server opens short on Pine signal + bear regime + score cap*",
             "inline": False,
         })
 
@@ -236,21 +247,19 @@ def notify_trade_opened(trade: dict, news: list = None) -> None:
     def fmt(p): return f"${p:,.6g}"
 
     action_emoji = "🟢" if side == "LONG" else "🔴"
-    action_word  = "BUY" if side == "LONG" else "SELL"
+    action_word  = "BUY" if side == "LONG" else "SELL SHORT"
     url          = _binance_us_url(sym)
     now          = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     reason_line = f"\n*{reason[:180]}*" if reason else ""
+
+    # Mobile-friendly layout: most important info first, action button prominent
     description = (
-        f"**{fmt(entry)}** entry\n"
-        f"Stop loss  **{fmt(stop)}**  `{stop_pct:+.1f}%`\n"
-        f"Take profit  **{fmt(target)}**  `{target_pct:+.1f}%`\n"
-        f"R:R  **{rr:.1f}:1**  •  Confidence  **{conf:.0%}**\n\n"
-        f"**What to do:**\n"
-        f"1️⃣  [Open {sym} on Binance.US]({url})\n"
-        f"2️⃣  {action_word}  **${dollar_size:,.0f}**  at market  (~{quantity:,.4g} units)\n"
-        f"3️⃣  Set stop-loss at  **{fmt(stop)}**\n"
-        f"4️⃣  Set take-profit at  **{fmt(target)}**"
+        f"Entry **{fmt(entry)}**  •  R:R **{rr:.1f}:1**  •  Size **${dollar_size:,.0f}**\n"
+        f"Stop **{fmt(stop)}** `{stop_pct:+.1f}%`  →  Target **{fmt(target)}** `{target_pct:+.1f}%`\n"
+        f"Confidence **{conf:.0%}**  •  ~{quantity:,.4g} units\n\n"
+        f"## [🚀 Execute on Binance.US →]({url})\n"
+        f"*{action_word} {sym} at market, set SL {fmt(stop)}, TP {fmt(target)}*"
         f"{reason_line}"
     )
 

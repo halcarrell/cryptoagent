@@ -156,6 +156,7 @@ def init_db():
         reversal REAL,
         rel_strength REAL,
         decorrelation REAL,
+        composite_score REAL,
         PRIMARY KEY (pick_date, coin_id)
     );
 
@@ -167,6 +168,7 @@ def init_db():
     for table, col in [
         ("picks",        "decorrelation_score"),
         ("factor_scores","decorrelation"),
+        ("factor_scores","composite_score"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
@@ -410,12 +412,13 @@ def cmd_fetch(conn):
         cur.execute("""
             INSERT OR REPLACE INTO factor_scores
             (pick_date, coin_id, symbol, momentum, volume, volatility,
-             reversal, rel_strength, decorrelation)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             reversal, rel_strength, decorrelation, composite_score)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, (
             today, s["coin_id"], s["symbol"],
             s["momentum_score"], s["volume_score"], s["volatility_score"],
             s["reversal_score"], s["rs_score"], s["decorrelation_score"],
+            s["composite_score"],
         ))
 
     picks = scored[:TOP_N_PICKS]
@@ -798,9 +801,24 @@ def cmd_daily(conn):
     except Exception as e:
         print(f"[daily] News fetch failed (non-fatal): {e}", flush=True)
 
+    # Bottom-5 scored coins from today's full universe — short watch candidates.
+    # Filters out stablecoins and coins not eligible (same as main screener).
+    short_watch = []
+    try:
+        cur.execute("""
+            SELECT symbol, composite_score FROM factor_scores
+            WHERE pick_date = ? AND composite_score IS NOT NULL
+            ORDER BY composite_score ASC LIMIT 5
+        """, (today,))
+        short_watch = [{"symbol": r[0], "score": round(r[1], 2)}
+                       for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[daily] Short watch query failed: {e}", flush=True)
+
     try:
         notify_daily_picks(picks, today, warnings, watchlist_symbols=watchlist_symbols,
-                           news_by_symbol=news_by_symbol, paper_stats=paper_stats)
+                           news_by_symbol=news_by_symbol, paper_stats=paper_stats,
+                           short_watch=short_watch)
     except Exception as e:
         print(f"[daily] Discord picks notify failed: {e}", flush=True)
 

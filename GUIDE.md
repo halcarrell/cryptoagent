@@ -95,7 +95,13 @@ Takes 2–3 minutes. Shows today's top 10 picks when done.
 4. Click **Save** → **Add to chart**
 5. Click the ⚙ gear on the indicator → set **Webhook auth token** to your `WEBHOOK_AUTH_TOKEN` from Railway → **OK**
 
-> The Pine Script is static — you never need to edit it again. The server handles all score checking.
+> The Pine Script never needs editing. The server handles all score/regime checking. Short signals are also embedded — the server decides whether to act on them.
+
+**Mobile alert format:** TradingView push notifications now show a human-readable summary:
+```
+🟢 LONG INJUSDT @ 7.10  SL -5.1%  TP +15.3%  R:R 3.0:1  RSI 45.2
+```
+The JSON payload for the server is attached after the first line — you never see it.
 
 **Import today's watchlist:**
 
@@ -119,9 +125,24 @@ In TradingView: Watchlist panel → **⋯** → **Import list** → select the f
    ```
 5. Click **Create**
 
-> Alerts are permanent — they don't break when picks change. Only re-create if you add new coins to the watchlist.
+> One alert covers both long and short signals. Alerts are permanent — only re-create if you add new coins.
 
 **TradingView plan note:** Webhooks require Essential plan ($15/mo) or higher. The webhook field appears on free plans but never fires.
+
+### One-Click Execute
+
+**From Discord (fastest for mobile):**
+Every trade card now includes a **[🚀 Execute on Binance.US →]** link. Tapping it opens Binance.US directly to the trading pair with the entry price visible. You then place the order manually in 2 taps.
+
+**From TradingView charts (native broker integration):**
+TradingView supports direct order placement when connected to Coinbase Advanced Trade:
+1. TradingView → Profile → Trading Panel → Connect Broker → **Coinbase**
+2. Authorise with your Coinbase account
+3. The chart shows a Buy/Sell panel — you can place orders without leaving TradingView
+
+> Binance.US is not yet a TradingView broker partner. Use the Discord link or the Binance.US app directly for Binance.US trades.
+
+**Future: fully automated execution** — when ready for live trading, set `BINANCE_API_KEY` and `BINANCE_API_SECRET` in Railway. The server will place real orders automatically when a paper trade opens (coming soon).
 
 ---
 

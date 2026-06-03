@@ -1,20 +1,31 @@
 //@version=6
 // =============================================================
 // Screener Confirmation Signals
-//   - Confirms momentum entries on screener picks
-//   - Fires webhook alert to Python server (score/R:R checked server-side)
-//   - Set auth token once in Alert/Webhook settings — never needs changing
+//   - Confirms momentum entries AND overextended reversal shorts
+//   - Alert format: human-readable header + JSON body
+//     Mobile notification shows the header line only.
+//     Webhook server extracts the JSON from the full payload.
+//   - Set auth token once in Alert/Webhook settings
 // =============================================================
 indicator("Screener Confirmation", overlay=true, max_labels_count=50)
 
-// ===== Confirmation Filters =====
-g_filt = "Confirmation Filters"
-use_trend  = input.bool(true,  "EMA50 > EMA200 (uptrend)",       group=g_filt)
-use_vol    = input.bool(true,  "Volume spike (1.5× avg)",         group=g_filt)
-use_vwap   = input.bool(true,  "Above VWAP",                     group=g_filt)
-use_green  = input.bool(true,  "Green bar (close > open)",        group=g_filt)
-use_rsi    = input.bool(false, "RSI not overbought (< 70)",       group=g_filt,
+// ===== Confirmation Filters (Longs) =====
+g_filt = "Long Confirmation Filters"
+use_trend  = input.bool(true,  "EMA50 > EMA200 (uptrend)",           group=g_filt)
+use_vol    = input.bool(true,  "Volume spike (1.5× avg)",             group=g_filt)
+use_vwap   = input.bool(true,  "Above VWAP",                         group=g_filt)
+use_green  = input.bool(true,  "Green bar (close > open)",            group=g_filt)
+use_rsi    = input.bool(false, "RSI not overbought (< 70)",           group=g_filt,
      tooltip="Off by default — only enable if you're getting too many signals")
+
+// ===== Short Filters =====
+g_short = "Short Confirmation Filters"
+use_shorts   = input.bool(true,  "Enable short signals",              group=g_short,
+     tooltip="Fires when coin is overextended — server applies score cap + regime check")
+use_s_trend  = input.bool(true,  "EMA50 < EMA200 (downtrend) or flat", group=g_short)
+use_s_rsi    = input.bool(true,  "RSI overbought (> 70)",             group=g_short)
+use_s_vwap   = input.bool(true,  "Price extended above VWAP (> 1%)",  group=g_short)
+use_s_vol    = input.bool(true,  "Volume spike (2× avg — distribution)", group=g_short)
 
 // ===== Risk Settings =====
 g_risk = "Risk"
@@ -34,7 +45,7 @@ ema50   = ta.ema(close, 50)
 ema200  = ta.ema(close, 200)
 atr_v   = ta.atr(14)
 
-// ===== Signal Conditions =====
+// ===== Long Conditions =====
 trend_ok = not use_trend or ema50 > ema200
 vol_ok   = not use_vol   or volume > vol_avg * 1.5
 vwap_ok  = not use_vwap  or close > vwap_v
@@ -43,35 +54,94 @@ rsi_ok   = not use_rsi   or rsi_v < 70
 
 long_entry = trend_ok and vol_ok and vwap_ok and green_ok and rsi_ok
 
-stop_price   = close - atr_v * atr_stop_mult
-target_price = close + atr_v * atr_target_mult
+// ===== Short Conditions =====
+// Overextended: RSI overbought + price extended above VWAP + distribution volume
+// Server applies score cap check (>2.5) + regime gate before opening any short.
+s_trend_ok = not use_s_trend or ema50 <= ema200
+s_rsi_ok   = not use_s_rsi   or rsi_v > 70
+s_vwap_ok  = not use_s_vwap  or close > vwap_v * 1.01
+s_vol_ok   = not use_s_vol   or volume > vol_avg * 2.0
+red_ok     = close < open  // red bar confirms distribution
+
+short_entry = use_shorts and s_trend_ok and s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
+           and not long_entry  // never fire both on same bar
+
+// ===== Stop / Target =====
+long_stop    = close - atr_v * atr_stop_mult
+long_target  = close + atr_v * atr_target_mult
+short_stop   = close + atr_v * atr_stop_mult   // above entry for shorts
+short_target = close - atr_v * atr_target_mult // below entry for shorts
+
+// ===== R:R (fixed by ATR multipliers) =====
+rr_val = atr_target_mult / atr_stop_mult
 
 // ===== Plot =====
 plot(vwap_v, color=color.orange, title="VWAP")
 plot(ema50,  color=color.blue,   title="EMA50")
 plot(ema200, color=color.purple, title="EMA200")
-bgcolor(long_entry ? color.new(color.green, 90) : na, title="Signal active")
+bgcolor(long_entry  ? color.new(color.green, 90) : na, title="Long signal")
+bgcolor(short_entry ? color.new(color.red,   90) : na, title="Short signal")
 
 if long_entry
     label.new(bar_index, low,
-              "SIGNAL\nE:" + str.tostring(close, format.mintick) +
-              "\nS:" + str.tostring(stop_price, format.mintick) +
-              "\nT:" + str.tostring(target_price, format.mintick),
+              "🟢 LONG\nE:" + str.tostring(close, format.mintick) +
+              "\nS:" + str.tostring(long_stop, format.mintick) +
+              "\nT:" + str.tostring(long_target, format.mintick),
               color=color.green, textcolor=color.white,
               style=label.style_label_up, yloc=yloc.belowbar)
 
-// ===== Webhook Alert =====
-if long_entry
-    payload = '{"auth":"'    + auth_token               + '"' +
-              ',"symbol":"'  + syminfo.ticker            + '"' +
-              ',"exchange":"' + syminfo.prefix           + '"' +
-              ',"side":"long"'                                  +
-              ',"entry":'    + str.tostring(close)       +
-              ',"stop":'     + str.tostring(stop_price)  +
-              ',"target":'   + str.tostring(target_price)+
-              ',"rsi":'      + str.tostring(rsi_v)       +
-              ',"time":"'    + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
-    alert(payload, alert.freq_once_per_bar_close)
+if short_entry
+    label.new(bar_index, high,
+              "🔴 SHORT\nE:" + str.tostring(close, format.mintick) +
+              "\nS:" + str.tostring(short_stop, format.mintick) +
+              "\nT:" + str.tostring(short_target, format.mintick),
+              color=color.red, textcolor=color.white,
+              style=label.style_label_down, yloc=yloc.abovebar)
 
-alertcondition(long_entry, title="Long entry confirmed",
-     message="Technical signal on {{ticker}} — check Python server for decision")
+// ===== Alerts =====
+// Message format: human-readable header on line 1 (shown in mobile push notification),
+// compact JSON on line 2 (parsed by webhook server).
+// Mobile shows only the first ~80 characters — the header fits perfectly.
+
+if long_entry
+    stop_pct   = math.round((long_stop   - close) / close * 100, 1)
+    target_pct = math.round((long_target - close) / close * 100, 1)
+    header  = "🟢 LONG "  + syminfo.ticker +
+              " @ "       + str.tostring(close,       format.mintick) +
+              "  SL "     + str.tostring(stop_pct)   + "%" +
+              "  TP +"    + str.tostring(target_pct) + "%" +
+              "  R:R "    + str.tostring(rr_val,      "#.#") + ":1" +
+              "  RSI "    + str.tostring(math.round(rsi_v, 1))
+    payload = '{"auth":"'     + auth_token                                              + '"' +
+              ',"symbol":"'   + syminfo.ticker                                          + '"' +
+              ',"exchange":"' + syminfo.prefix                                          + '"' +
+              ',"side":"long"'                                                                +
+              ',"entry":'     + str.tostring(close)                                         +
+              ',"stop":'      + str.tostring(long_stop)                                     +
+              ',"target":'    + str.tostring(long_target)                                   +
+              ',"rsi":'       + str.tostring(math.round(rsi_v, 2))                         +
+              ',"time":"'     + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
+    alert(header + "\n" + payload, alert.freq_once_per_bar_close)
+
+if short_entry
+    stop_pct   = math.round((short_stop   - close) / close * 100, 1)
+    target_pct = math.round((short_target - close) / close * 100, 1)
+    header  = "🔴 SHORT " + syminfo.ticker +
+              " @ "       + str.tostring(close,       format.mintick) +
+              "  SL +"    + str.tostring(stop_pct)   + "%" +
+              "  TP -"    + str.tostring(math.abs(target_pct)) + "%" +
+              "  R:R "    + str.tostring(rr_val,      "#.#") + ":1" +
+              "  RSI "    + str.tostring(math.round(rsi_v, 1))
+    payload = '{"auth":"'     + auth_token                                              + '"' +
+              ',"symbol":"'   + syminfo.ticker                                          + '"' +
+              ',"exchange":"' + syminfo.prefix                                          + '"' +
+              ',"side":"short"'                                                               +
+              ',"entry":'     + str.tostring(close)                                         +
+              ',"stop":'      + str.tostring(short_stop)                                    +
+              ',"target":'    + str.tostring(short_target)                                  +
+              ',"rsi":'       + str.tostring(math.round(rsi_v, 2))                         +
+              ',"time":"'     + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
+    alert(header + "\n" + payload, alert.freq_once_per_bar_close)
+
+alertcondition(long_entry,  title="Long entry confirmed",  message="Long signal on {{ticker}}")
+alertcondition(short_entry, title="Short entry confirmed", message="Short signal on {{ticker}}")
