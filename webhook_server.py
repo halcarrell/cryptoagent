@@ -349,6 +349,29 @@ def run_evaluate():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/notify", methods=["POST"])
+def relay_notify():
+    """Discord relay — remote agents POST here instead of hitting Discord directly.
+
+    Accepts the standard Discord webhook payload shape plus an auth field:
+        {"auth": "TOKEN", "embeds": [...]}
+    Railway strips the auth and forwards the embeds to DISCORD_WEBHOOK_URL.
+    This avoids Anthropic CCR IP addresses being rate-limited by Discord.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    if data.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    embeds = data.get("embeds")
+    if not embeds:
+        return jsonify({"error": "no embeds provided"}), 400
+    try:
+        from notifier import _discord_post
+        _discord_post({"embeds": embeds})
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/status", methods=["GET"])
 def system_status():
     """System health: picks freshness, open trades, recent alert activity."""
