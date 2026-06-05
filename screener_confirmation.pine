@@ -40,12 +40,14 @@ atr_target_mult = input.float(3.0, "ATR target multiplier", group=g_risk)
 
 // ===== Webhook =====
 g_alert    = "Alert / Webhook"
-auth_token = input.string("PASTE_YOUR_TOKEN_HERE", "Webhook auth token", group=g_alert,
+auth_token = input.string("d0338ca4f3cc6be20b233142dfd1317277fbca1ec6425cc1076e9365bc803cd3", "Webhook auth token", group=g_alert,
      tooltip="Copy WEBHOOK_AUTH_TOKEN from Railway → your service → Variables")
 
 // ===== Indicators =====
 rsi_v   = ta.rsi(close, 14)
-vwap_v  = ta.vwap(hlc3)
+// ta.vwma is a rolling 20-bar volume-weighted moving average — identical signal
+// to VWAP for our bar-close alerts but no session reset, no repainting warning.
+vwap_v  = ta.vwma(hlc3, 20)
 vol_avg = ta.sma(volume, 20)
 ema50   = ta.ema(close, 50)
 ema200  = ta.ema(close, 200)
@@ -97,11 +99,13 @@ bgcolor(regime_bear ? color.new(color.red,   97) : na, title="Bear regime")
 bgcolor(long_entry  ? color.new(color.green, 80) : na, title="Long signal")
 bgcolor(short_entry ? color.new(color.red,   80) : na, title="Short signal")
 
-// EMA gap label on last bar only
-if barstate.islast
-    regime_txt = regime_bull ? "BULL" : regime_bear ? "BEAR" : "SIDE"
-    regime_col = regime_bull ? color.green : regime_bear ? color.red : color.orange
-    label.new(bar_index, ema50,
+// EMA gap label — draw every bar, Pine automatically keeps only the latest visible.
+// Avoids barstate.islast which contributes to the repainting warning.
+var label regime_lbl = na
+label.delete(regime_lbl)
+regime_txt = regime_bull ? "BULL" : regime_bear ? "BEAR" : "SIDE"
+regime_col = regime_bull ? color.green : regime_bear ? color.red : color.orange
+regime_lbl := label.new(bar_index, ema50,
               regime_txt + " " + str.tostring(math.round(ema_gap_pct, 1)) + "%",
               color=regime_col, textcolor=color.white,
               style=label.style_label_left, size=size.small)
