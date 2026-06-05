@@ -289,9 +289,11 @@ def webhook():
             if now_ts - _last_pass_alert_ts > _PASS_NOTIFY_COOLDOWN:
                 try:
                     from notifier import notify_signal_passed
+                    regime = ai_trader.btc_regime()
                     notify_signal_passed(
                         data.get("symbol", ""), pass_reason,
                         side=data.get("side", "long"),
+                        regime=regime,
                     )
                     _last_pass_alert_ts = now_ts
                 except Exception:

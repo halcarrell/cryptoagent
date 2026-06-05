@@ -6,6 +6,12 @@
 //     Mobile notification shows the header line only.
 //     Webhook server extracts the JSON from the full payload.
 //   - Set auth token once in Alert/Webhook settings
+//
+// TIMEFRAME GUIDE:
+//   4H — original, fewer signals, higher quality (recommended for beginners)
+//   1H — 4× more signals per day, faster entry, slightly noisier
+//   Apply this indicator on BOTH timeframes and create alerts on both
+//   for the most real-time coverage. The server handles all filtering.
 // =============================================================
 indicator("Screener Confirmation", overlay=true, max_labels_count=50)
 
@@ -75,12 +81,30 @@ short_target = close - atr_v * atr_target_mult // below entry for shorts
 // ===== R:R (fixed by ATR multipliers) =====
 rr_val = atr_target_mult / atr_stop_mult
 
+// ===== Regime (mirrors server-side three-state gate) =====
+ema_gap_pct  = (ema50 - ema200) / ema200 * 100
+regime_bull  = ema_gap_pct >  2.0
+regime_bear  = ema_gap_pct < -2.0
+regime_side  = not regime_bull and not regime_bear
+
 // ===== Plot =====
-plot(vwap_v, color=color.orange, title="VWAP")
-plot(ema50,  color=color.blue,   title="EMA50")
-plot(ema200, color=color.purple, title="EMA200")
-bgcolor(long_entry  ? color.new(color.green, 90) : na, title="Long signal")
-bgcolor(short_entry ? color.new(color.red,   90) : na, title="Short signal")
+plot(vwap_v, color=color.orange,       title="VWAP")
+plot(ema50,  color=color.blue,         title="EMA50",  linewidth=2)
+plot(ema200, color=color.purple,       title="EMA200", linewidth=2)
+bgcolor(regime_bull ? color.new(color.green, 97) : na, title="Bull regime")
+bgcolor(regime_side ? color.new(color.yellow,97) : na, title="Sideways regime")
+bgcolor(regime_bear ? color.new(color.red,   97) : na, title="Bear regime")
+bgcolor(long_entry  ? color.new(color.green, 80) : na, title="Long signal")
+bgcolor(short_entry ? color.new(color.red,   80) : na, title="Short signal")
+
+// EMA gap label on last bar only
+if barstate.islast
+    regime_txt = regime_bull ? "BULL" : regime_bear ? "BEAR" : "SIDE"
+    regime_col = regime_bull ? color.green : regime_bear ? color.red : color.orange
+    label.new(bar_index, ema50,
+              regime_txt + " " + str.tostring(math.round(ema_gap_pct, 1)) + "%",
+              color=regime_col, textcolor=color.white,
+              style=label.style_label_left, size=size.small)
 
 if long_entry
     label.new(bar_index, low,

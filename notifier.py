@@ -215,21 +215,28 @@ def notify_risk_rejection(symbol: str, reason: str) -> None:
     })
 
 
-def notify_signal_passed(symbol: str, reason: str, side: str = "long") -> None:
+def notify_signal_passed(symbol: str, reason: str, side: str = "long",
+                         regime: str = "") -> None:
     """Grey Discord card when a signal fires but the server skips the trade.
 
     Sent at most once per 4 hours (cooldown enforced in webhook_server.py)
     so repeated signals in the same bear stretch don't flood the channel.
     """
     side_emoji = "🟢" if (side or "long") == "long" else "🔴"
+    regime_line = ""
+    if regime:
+        icons = {"bull": "📈 BULL", "sideways": "↔️ SIDEWAYS", "bear": "📉 BEAR"}
+        regime_line = f"\n**BTC Regime:** {icons.get(regime, regime.upper())}"
     _discord_post({
         "embeds": [{
             "title": f"⏸ Signal skipped — {symbol}",
             "color": 0x95A5A6,
             "description": (
-                f"{side_emoji} **{(side or 'long').upper()}** signal received but not traded.\n\n"
+                f"{side_emoji} **{(side or 'long').upper()}** signal received but not traded."
+                f"{regime_line}\n\n"
                 f"**Reason:** {reason}\n\n"
-                f"*No action needed — the system will re-evaluate on the next signal.*"
+                f"*System trades decorrelated coins in sideways/bear markets — "
+                f"check daily picks for decorrelation scores.*"
             ),
             "footer": {"text": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
         }]

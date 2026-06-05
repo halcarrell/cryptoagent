@@ -182,12 +182,15 @@ def get_screener_context(symbol_base: str, date=None):
         pass
 
     cur.execute(
-        "SELECT rank, composite_score FROM picks WHERE pick_date = ? AND symbol = ?",
+        "SELECT rank, composite_score, decorrelation_score FROM picks WHERE pick_date = ? AND symbol = ?",
         (date, symbol_base.upper())
     )
     row = cur.fetchone()
     conn.close()
-    return {"rank": row[0], "score": row[1], "date": date} if row else None
+    if not row:
+        return None
+    return {"rank": row[0], "score": row[1], "date": date,
+            "decorrelation": round(row[2] or 0.0, 3)}
 
 
 def strip_quote(symbol: str) -> str:
@@ -278,38 +281,53 @@ def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -
 _btc_regime_cache: tuple = (0.0, True)  # (monotonic_ts, result) — 4H TTL
 
 
-def btc_regime_bullish() -> bool:
-    """True when BTC 4H EMA50 > EMA200 (uptrend intact).
+def btc_regime() -> str:
+    """Returns 'bull', 'sideways', or 'bear' from BTC 4H EMA structure.
 
-    Cached for 4 hours — same cadence as 4H bar closes, so the value only
-    updates when new market structure information is available.
-    Fails open (returns True) so a Binance outage never silently blocks trades.
+    BULL:     EMA50 > EMA200 by > 2%  → full long signals allowed
+    SIDEWAYS: EMAs within 2% of each  → decorrelated longs only (decorr > 0.5)
+    BEAR:     EMA200 > EMA50 by > 2%  → shorts + strongly decorrelated longs (decorr > 1.5)
+
+    Cached 4 hours. Fails to 'bull' on data unavailability so outages never
+    silently block all trading.
     """
     global _btc_regime_cache
     import time as _time
     now = _time.monotonic()
     ts, cached = _btc_regime_cache
-    if now - ts < 14_400:          # 4-hour cache
-        return cached
+    if now - ts < 14_400:
+        # Cache stores str ('bull'/'sideways'/'bear') or legacy bool
+        if isinstance(cached, str):
+            return cached
+        return "bull" if cached else "bear"
     try:
-        since   = datetime.now(timezone.utc) - timedelta(days=36)  # ~216 bars
+        since   = datetime.now(timezone.utc) - timedelta(days=36)
         candles = fetch_binance_ohlcv("BTCUSDT", since, "4h")
         closes  = [c["close"] for c in candles]
         if len(closes) < 200:
-            return True            # not enough history yet — don't block
-        # Incremental EMA so we don't need numpy
+            _btc_regime_cache = (now, "bull")
+            return "bull"
         k50, k200 = 2 / 51, 2 / 201
         e50 = e200 = closes[0]
         for p in closes[1:]:
             e50  = p * k50  + e50  * (1 - k50)
             e200 = p * k200 + e200 * (1 - k200)
-        result = e50 > e200
+        gap_pct = (e50 - e200) / e200 * 100 if e200 else 0
+        if   gap_pct >  2.0: result = "bull"
+        elif gap_pct < -2.0: result = "bear"
+        else:                 result = "sideways"
         _btc_regime_cache = (now, result)
         print(f"[regime] BTC 4H EMA50={e50:.2f} EMA200={e200:.2f} "
-              f"→ {'BULL ✓' if result else 'BEAR — blocking altcoin longs'}", flush=True)
+              f"gap={gap_pct:+.1f}% → {result.upper()}", flush=True)
         return result
     except Exception:
-        return True                # fail open
+        _btc_regime_cache = (_time.monotonic(), "bull")
+        return "bull"
+
+
+def btc_regime_bullish() -> bool:
+    """Backward-compat alias: True only in full bull regime."""
+    return btc_regime() == "bull"
 
 
 # ---------- Decision logic ----------
@@ -387,29 +405,60 @@ def decide_trade(alert: dict) -> TradeDecision:
                              f"Screener score {ctx['score']:.2f} above {MAX_SCORE_TO_TRADE} cap "
                              f"— likely overextended/late-stage breakout.")
 
-    # Pine Script short signals require bear regime confirmation.
+    # Pine Script short signals require bear or sideways regime.
     # Server-generated reversal shorts (above) already checked this.
-    if side == "short" and btc_regime_bullish():
+    regime = btc_regime()
+    if side == "short" and regime == "bull":
         return TradeDecision("pass", side, symbol, entry, stop, target,
-                             0, 0.2,
-                             "BTC regime is bullish — skipping short signal.")
+                             0, 0.2, "BTC regime is bull — skipping short signal.")
 
-    # BTC regime gate for longs — only after screener passes so we don't burn a
-    # Binance request on every rejected signal. Short setups are exempt.
-    if side == "long" and not btc_regime_bullish():
-        return TradeDecision("pass", side, symbol, entry, stop, target,
-                             0, 0.2,
-                             "BTC 4H EMA50 < EMA200 — bearish market regime, "
-                             "skipping altcoin long to avoid headwind.")
+    # Three-state long regime gate — different rules per regime:
+    #   BULL:     full position — momentum trades work best here
+    #   SIDEWAYS: decorrelated coins only at half size (coins moving independently)
+    #   BEAR:     strongly decorrelated coins only at quarter size
+    if side == "long":
+        decorr = ctx.get("decorrelation", 0.0)
+        if regime == "sideways":
+            if decorr < 0.5:
+                return TradeDecision("pass", side, symbol, entry, stop, target,
+                                     0, 0.2,
+                                     f"BTC sideways regime — {base} decorr={decorr:.2f} "
+                                     f"too low (need > 0.5). Trade only coins moving "
+                                     f"independently of BTC in choppy markets.")
+            # Allow at half size — sideways is uncertain
+            confidence = min(1.0, max(0.0, ctx["score"]))
+            size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
+            reasoning  = (
+                f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
+                f"BTC sideways — half size. R:R={rr:.2f}."
+            )
+            return TradeDecision("enter", side, symbol, entry, stop, target,
+                                 size_pct, confidence, reasoning)
+        elif regime == "bear":
+            if decorr < 1.5:
+                return TradeDecision("pass", side, symbol, entry, stop, target,
+                                     0, 0.2,
+                                     f"BTC bear regime — {base} decorr={decorr:.2f} "
+                                     f"insufficient (need > 1.5). Only strongly "
+                                     f"anti-correlated coins qualify in bear markets.")
+            # Allow at quarter size — fighting the macro trend, higher risk
+            confidence = min(1.0, max(0.0, ctx["score"]))
+            size_pct   = round(MAX_POSITION_PCT * confidence * 0.25, 2)
+            reasoning  = (
+                f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
+                f"BTC bear but strongly anti-correlated — quarter size. R:R={rr:.2f}."
+            )
+            return TradeDecision("enter", side, symbol, entry, stop, target,
+                                 size_pct, confidence, reasoning)
+        # Bull regime: fall through to full-size logic below
 
-    # Position sizing scales with confidence
+    # Full position sizing (bull regime longs + all shorts that passed above)
     confidence = min(1.0, max(0.0, ctx["score"]))
     size_pct   = round(MAX_POSITION_PCT * confidence, 2)
 
     reasoning = (
-        f"{base} ranked #{ctx['rank']} in screener (score={ctx['score']:.2f}). "
-        f"Pine confirmation fired with R:R={rr:.2f}. "
-        f"Sizing {size_pct}% on confidence {confidence:.2f}."
+        f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, regime={regime}). "
+        f"R:R={rr:.2f}. Sizing {size_pct}% on confidence {confidence:.2f}."
     )
     return TradeDecision("enter", side, symbol, entry, stop, target,
                          size_pct, confidence, reasoning)
@@ -426,13 +475,17 @@ def decide_trade_with_llm(alert: dict, anthropic_api_key: str) -> TradeDecision:
     ctx  = get_screener_context(base)
 
     # BTC regime gate — skip the LLM call entirely if regime is bearish (saves API cost)
-    if alert.get("side", "long") == "long" and not btc_regime_bullish():
-        return TradeDecision("pass", alert.get("side"), alert.get("symbol", ""),
-                             alert.get("entry"), alert.get("stop"), alert.get("target"),
-                             0, 0.2,
-                             "BTC 4H EMA50 < EMA200 — bearish market regime, "
-                             "skipping altcoin long to avoid headwind.",
-                             decider="llm")
+    regime   = btc_regime()
+    side_req = alert.get("side", "long")
+    if side_req == "long" and regime == "bear":
+        decorr = ctx.get("decorrelation", 0.0) if ctx else 0.0
+        if decorr < 1.5:
+            return TradeDecision("pass", side_req, alert.get("symbol", ""),
+                                 alert.get("entry"), alert.get("stop"), alert.get("target"),
+                                 0, 0.2,
+                                 f"BTC bear regime — decorr={decorr:.2f} insufficient "
+                                 f"(need > 1.5 for a long in bear market).",
+                                 decider="llm")
 
     # Reuse the funding rate that log_alert already cached on the dict if
     # present, otherwise fetch — so this works even if called outside the
@@ -446,6 +499,7 @@ def decide_trade_with_llm(alert: dict, anthropic_api_key: str) -> TradeDecision:
 
 Alert: {json.dumps(_redact_payload(alert))}
 Screener context: {json.dumps(ctx) if ctx else "Not in today's top 10"}
+BTC market regime: {regime.upper()} (bull=full longs, sideways=decorrelated longs at half size, bear=shorts + strongly decorrelated longs at quarter size)
 Funding rate (8h): {funding_str}
 
 Hard rules:
@@ -453,6 +507,8 @@ Hard rules:
 - Reject if R:R < {MIN_RISK_REWARD}.
 - Reject if score < {MIN_SCORE_TO_TRADE}.
 - Reject if score > {MAX_SCORE_TO_TRADE} (overextended — late-stage breakout risk).
+- In BEAR regime: reject longs unless decorrelation_score > 1.5 in context; use 25% of normal size.
+- In SIDEWAYS regime: allow longs with decorrelation_score > 0.5; use 50% of normal size.
 - Size 0-{MAX_POSITION_PCT}% based on confidence.
 
 Soft priors (use judgment, don't auto-reject):
