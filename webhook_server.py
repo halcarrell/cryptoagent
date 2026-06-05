@@ -103,6 +103,50 @@ def _run_refit():
         print(f"[scheduler] Refit failed: {e}", flush=True)
 
 
+def _run_daily_test():
+    """Daily self-test at 14:00 UTC — hits live endpoints and posts pass/fail to Discord."""
+    import requests as _req
+    from notifier import _discord_post
+
+    base = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    if not base:
+        print("[self-test] RAILWAY_PUBLIC_DOMAIN not set — skipping.", flush=True)
+        return
+    base_url = f"https://{base}"
+    token    = AUTH_TOKEN
+    now_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    checks = [
+        ("Health",    "GET",  f"{base_url}/",                        None),
+        ("Picks",     "GET",  f"{base_url}/picks?auth={token}",      None),
+        ("Status",    "GET",  f"{base_url}/status?auth={token}",     None),
+        ("Analysis",  "GET",  f"{base_url}/analysis?auth={token}",   None),
+        ("Evaluate",  "POST", f"{base_url}/evaluate",                {"auth": token, "mode": "snapshots"}),
+    ]
+
+    results, passed, failed = [], 0, 0
+    for name, method, url, body in checks:
+        try:
+            r = (_req.post(url, json=body, timeout=10)
+                 if method == "POST"
+                 else _req.get(url, timeout=10))
+            ok  = r.status_code in (200, 204)
+            passed += ok; failed += not ok
+            results.append(f"{'✅' if ok else '❌'} **{name}** — {r.status_code}")
+        except Exception as e:
+            failed += 1
+            results.append(f"❌ **{name}** — {e}")
+
+    color = 0x2ECC71 if failed == 0 else (0xE67E22 if failed <= 2 else 0xE74C3C)
+    _discord_post({"embeds": [{
+        "title": f"{'✅' if failed == 0 else '⚠' if failed <= 2 else '🔴'} Daily self-test — {passed}/{len(checks)} passed",
+        "color": color,
+        "description": "\n".join(results),
+        "footer": {"text": now_str},
+    }]})
+    print(f"[self-test] {passed}/{len(checks)} passed.", flush=True)
+
+
 def _picks_exist_today() -> bool:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
@@ -121,13 +165,15 @@ def start_scheduler():
     scheduler = BackgroundScheduler(timezone="UTC")
     # Daily screener: 1pm UTC every day
     scheduler.add_job(_run_daily, "cron", hour=13, minute=0, id="daily")
-    # Weekly refit: 2pm UTC every Sunday
-    scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=0, id="refit")
+    # Daily self-test: 2pm UTC every day (1 hour after screener)
+    scheduler.add_job(_run_daily_test, "cron", hour=14, minute=0, id="self_test")
+    # Weekly refit: 2pm UTC every Sunday (self-test runs at :00, refit at :05)
+    scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=5, id="refit")
     # Live trade evaluation: every 4h at :15 past each 4H bar close (0,4,8,12,16,20 UTC)
     scheduler.add_job(_run_live_eval, "cron", hour="0,4,8,12,16,20", minute=15, id="live_eval")
     scheduler.start()
-    print("[scheduler] Started — daily@13:00 UTC, live-eval@every 4h, refit@Sunday 14:00 UTC",
-          flush=True)
+    print("[scheduler] Started — daily@13:00 UTC, self-test@14:00 UTC, "
+          "live-eval@every 4h, refit@Sunday 14:05 UTC", flush=True)
 
     # Catch-up: if it's past 1pm UTC and no picks yet today, run immediately
     now = datetime.now(timezone.utc)

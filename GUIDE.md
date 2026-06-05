@@ -56,6 +56,7 @@ git push -u origin main
 | `PORTFOLIO_USD` | Your paper trading budget e.g. `10000` |
 | `COINGECKO_API_KEY` | *(optional but recommended)* Free Demo API key — see note below |
 | `TIINGO_API_KEY` | *(optional)* Free API key from [api.tiingo.com](https://api.tiingo.com) — enables ticker-specific news headlines in Discord trade cards and daily picks. Falls back to free RSS feeds (CoinDesk/CoinTelegraph/Decrypt) when not set. |
+| `RAILWAY_PUBLIC_DOMAIN` | Your Railway service domain **without** `https://` — e.g. `cryptoagent-production.up.railway.app`. Required for the daily self-test to hit its own endpoints. Copy from Railway → Settings → Networking → Public Domain. |
 
 > **CoinGecko free Demo key:** go to [coingecko.com](https://coingecko.com) → sign up free → API → Demo → copy key. Raises the rate limit from ~10 to 30 req/min and prevents 429 errors during the daily fetch. No credit card needed.
 
@@ -154,11 +155,10 @@ TradingView supports direct order placement when connected to Coinbase Advanced 
 |---|---|
 | Daily 1pm UTC | Screener fetches 250 coins, applies pump guard, posts picks to Discord |
 | Daily 1pm UTC | ⚡ Strong Signals alert fires if exceptional conditions detected |
-| Daily 1pm UTC | Health check email sent (if configured) |
-| Daily 2pm UTC | Automated test agent runs 5 live endpoint checks, posts pass/fail to Discord |
+| Daily 2pm UTC | Self-test: 5 live endpoint checks, posts ✅/⚠/🔴 report to Discord |
 | Sunday 2pm UTC | Weight refitter runs, posts results to Discord |
-| Monday 3pm UTC | Weekly enhancement agent reviews code, researches new data sources, posts report to Discord |
 | Always on | Webhook server receives TradingView alerts 24/7 |
+| Always on | Every 4H at :15 UTC — live price evaluation of open paper trades |
 
 Everything runs inside the single Railway web service — no separate cron jobs needed.
 
