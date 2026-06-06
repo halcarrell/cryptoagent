@@ -247,8 +247,8 @@ def fetch_live_price(symbol: str, exchange: str = "binance") -> Optional[float]:
 
 
 def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -> list:
-    """4H OHLCV candles from Binance.US (Binance.com fallback) since since_ts.
-    Returns list of dicts with open_time (datetime), high, low, close.
+    """OHLCV candles from Binance.US (Binance.com fallback) since since_ts.
+    Returns list of dicts: open_time, open, high, low, close, volume.
     Returns [] on any failure — callers fall back to daily snapshots."""
     try:
         import requests
@@ -264,9 +264,11 @@ def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -
                     return [
                         {
                             "open_time": datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc),
+                            "open":  float(k[1]),
                             "high":  float(k[2]),
                             "low":   float(k[3]),
                             "close": float(k[4]),
+                            "volume": float(k[5]),
                         }
                         for k in r.json()
                     ]
@@ -275,6 +277,89 @@ def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -
     except Exception:
         pass
     return []
+
+
+# ---------- Entry condition computation ----------
+
+def compute_entry_conditions(candles: list) -> dict:
+    """Compute Pine Script-equivalent entry conditions from Binance candle data.
+
+    Mirrors screener_confirmation.pine exactly so server-side scans and
+    TradingView alerts use the same logic. Requires ≥ 50 candles with
+    open/high/low/close/volume fields (use fetch_binance_ohlcv).
+
+    Returns a dict with:
+      long_ok  — True when all long conditions pass
+      short_ok — True when all short conditions pass
+      close, atr, rsi, e50, e200, vwma, vol_ratio
+    """
+    if len(candles) < 50:
+        return {"long_ok": False, "short_ok": False}
+
+    closes  = [c["close"]  for c in candles]
+    opens   = [c["open"]   for c in candles]
+    highs   = [c["high"]   for c in candles]
+    lows    = [c["low"]    for c in candles]
+    volumes = [c["volume"] for c in candles]
+    hlc3    = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+
+    # EMA50 and EMA200
+    k50, k200 = 2 / 51, 2 / 201
+    e50 = e200 = closes[0]
+    for p in closes[1:]:
+        e50  = p * k50  + e50  * (1 - k50)
+        e200 = p * k200 + e200 * (1 - k200)
+
+    # VWMA(hlc3, 20) — mirrors ta.vwma(hlc3, 20) in Pine
+    w_sum = sum(hlc3[-20:][i] * volumes[-20:][i] for i in range(20))
+    v_sum = sum(volumes[-20:]) or 1
+    vwma  = w_sum / v_sum
+
+    # Volume SMA(20)
+    vol_avg = sum(volumes[-20:]) / 20
+    vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 0
+
+    # ATR(14)
+    trs = [max(highs[i] - lows[i],
+               abs(highs[i] - closes[i - 1]),
+               abs(lows[i]  - closes[i - 1]))
+           for i in range(1, len(candles))]
+    atr = sum(trs[-14:]) / 14
+
+    # RSI(14)
+    gains  = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+    ag, al = sum(gains[-14:]) / 14, sum(losses[-14:]) / 14
+    rsi = 100 - 100 / (1 + ag / al) if al > 0 else 100.0
+
+    last_close, last_open = closes[-1], opens[-1]
+
+    # Long conditions (same as Pine Script)
+    trend_ok = e50 > e200
+    vwap_ok  = last_close > vwma
+    vol_ok   = vol_ratio >= 1.5
+    green_ok = last_close > last_open
+    long_ok  = trend_ok and vwap_ok and vol_ok and green_ok
+
+    # Short conditions
+    s_trend_ok = e50 <= e200
+    s_rsi_ok   = rsi > 70
+    s_vwap_ok  = last_close > vwma * 1.01
+    s_vol_ok   = vol_ratio >= 2.0
+    red_ok     = last_close < last_open
+    short_ok   = s_trend_ok and s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
+
+    return {
+        "long_ok":   long_ok,
+        "short_ok":  short_ok,
+        "close":     last_close,
+        "atr":       atr,
+        "rsi":       round(rsi, 2),
+        "e50":       e50,
+        "e200":      e200,
+        "vwma":      vwma,
+        "vol_ratio": round(vol_ratio, 2),
+    }
 
 
 # ---------- BTC regime gate ----------

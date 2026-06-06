@@ -38,6 +38,15 @@ g_risk = "Risk"
 atr_stop_mult   = input.float(1.5, "ATR stop multiplier",   group=g_risk)
 atr_target_mult = input.float(3.0, "ATR target multiplier", group=g_risk)
 
+// ===== Session Gate =====
+// Research: 13-17 UTC = peak volume + cleanest momentum (EU/US overlap).
+// 02-06 UTC = lowest volume, widest spreads, most noise (worst entries).
+g_session   = "Session Gate"
+use_session = input.bool(true, "Limit to EU/US peak session (12–18 UTC)", group=g_session,
+     tooltip="Research-backed: 13-17 UTC has peak liquidity and momentum quality. Disable to also catch Asian session moves (noisier).")
+session_hour = hour(time, "UTC")
+session_ok   = not use_session or (session_hour >= 12 and session_hour < 18)
+
 // ===== Webhook =====
 g_alert    = "Alert / Webhook"
 auth_token = input.string("d0338ca4f3cc6be20b233142dfd1317277fbca1ec6425cc1076e9365bc803cd3", "Webhook auth token", group=g_alert,
@@ -60,7 +69,7 @@ vwap_ok  = not use_vwap  or close > vwap_v
 green_ok = not use_green or close > open
 rsi_ok   = not use_rsi   or rsi_v < 70
 
-long_entry = trend_ok and vol_ok and vwap_ok and green_ok and rsi_ok
+long_entry = trend_ok and vol_ok and vwap_ok and green_ok and rsi_ok and session_ok
 
 // ===== Short Conditions =====
 // Overextended: RSI overbought + price extended above VWAP + distribution volume
@@ -72,7 +81,7 @@ s_vol_ok   = not use_s_vol   or volume > vol_avg * 2.0
 red_ok     = close < open  // red bar confirms distribution
 
 short_entry = use_shorts and s_trend_ok and s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
-           and not long_entry  // never fire both on same bar
+           and session_ok and not long_entry  // never fire both on same bar
 
 // ===== Stop / Target =====
 long_stop    = close - atr_v * atr_stop_mult

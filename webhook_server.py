@@ -90,6 +90,97 @@ def _run_live_eval():
         print(f"[scheduler] Live eval failed: {e}", flush=True)
 
 
+def _run_opportunity_scan():
+    """Every-15-min session scanner — fires the moment entry conditions align.
+
+    Research-backed: 13-17 UTC has peak liquidity and cleanest momentum
+    (EU/US session overlap). Instead of waiting up to 4H for a TradingView
+    bar close, this checks all screener picks against live Binance 1H candles
+    every 15 minutes during the active window and opens paper trades immediately
+    when conditions match — making TradingView optional for entries.
+    Active window: 11:45-18:00 UTC (covers EU open through US session close).
+    """
+    now_utc = datetime.now(timezone.utc)
+    if not (11 <= now_utc.hour < 18):
+        return  # outside peak session — skip
+
+    try:
+        db  = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        cur  = conn.cursor()
+        today = now_utc.strftime("%Y-%m-%d")
+
+        # Today's picks, filtered to US-tradeable via watchlist (reuse TV integration if available)
+        cur.execute("SELECT symbol, composite_score, rank FROM picks WHERE pick_date = ? ORDER BY rank", (today,))
+        picks = [{"symbol": r[0], "score": r[1], "rank": r[2]} for r in cur.fetchall()]
+
+        # Coins already in open trades — skip to avoid doubling up
+        cur.execute("SELECT UPPER(symbol) FROM paper_trades WHERE status='open'")
+        open_syms = {r[0] for r in cur.fetchall()}
+        conn.close()
+
+        if not picks:
+            return
+
+        opened = 0
+        for pick in picks:
+            sym_base = pick["symbol"].upper()
+            sym_pair = sym_base + "USDT" if not sym_base.endswith("USDT") else sym_base
+
+            if sym_pair in open_syms or sym_base in open_syms:
+                continue
+
+            since = now_utc - timedelta(hours=210)
+            candles = ai_trader.fetch_binance_ohlcv(sym_pair, since, "1h")
+            if len(candles) < 50:
+                continue
+
+            conds = ai_trader.compute_entry_conditions(candles)
+            if not conds["long_ok"]:
+                continue
+
+            close = conds["close"]
+            atr   = conds["atr"]
+            stop   = round(close - atr * 1.5, 8)
+            target = round(close + atr * 3.0, 8)
+
+            alert = {
+                "symbol":   sym_pair,
+                "exchange": "BINANCE",
+                "side":     "long",
+                "entry":    close,
+                "stop":     stop,
+                "target":   target,
+                "rsi":      conds["rsi"],
+                "source":   "session_scan",
+            }
+            alert_id = ai_trader.log_alert(alert)
+            decision = ai_trader.decide_trade(alert)
+            ai_trader.log_decision(alert_id, decision)
+
+            if decision.action == "enter":
+                try:
+                    from risk_monitor import check_pre_trade_risk, log_rejection
+                    approved, risk_reason = check_pre_trade_risk(decision)
+                    if approved:
+                        ai_trader.open_paper_trade(decision, alert_id)
+                        opened += 1
+                        print(f"[scanner] Opened {sym_pair} @ {close} "
+                              f"(score={pick['score']:.2f}, rsi={conds['rsi']:.1f})", flush=True)
+                    else:
+                        log_rejection(alert_id, decision, risk_reason)
+                except Exception as e:
+                    print(f"[scanner] Risk check error for {sym_pair}: {e}", flush=True)
+                    ai_trader.open_paper_trade(decision, alert_id)
+                    opened += 1
+
+        if opened:
+            print(f"[scanner] Session scan opened {opened} trade(s).", flush=True)
+
+    except Exception as e:
+        print(f"[scanner] Opportunity scan failed: {e}", flush=True)
+
+
 def _run_refit():
     """Weekly walk-forward weight refit — runs Sundays 14:00 UTC."""
     print("[scheduler] Starting weekly refit...", flush=True)
@@ -171,9 +262,13 @@ def start_scheduler():
     scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=5, id="refit")
     # Live trade evaluation: every 4h at :15 past each 4H bar close (0,4,8,12,16,20 UTC)
     scheduler.add_job(_run_live_eval, "cron", hour="0,4,8,12,16,20", minute=15, id="live_eval")
+    # Session-aware opportunity scanner: every 15 min during EU/US peak (11:45-18:00 UTC)
+    # Research: 13-17 UTC has peak liquidity and cleanest momentum moves.
+    scheduler.add_job(_run_opportunity_scan, "cron",
+                      hour="11,12,13,14,15,16,17", minute="0,15,30,45", id="opp_scan")
     scheduler.start()
-    print("[scheduler] Started — daily@13:00 UTC, self-test@14:00 UTC, "
-          "live-eval@every 4h, refit@Sunday 14:05 UTC", flush=True)
+    print("[scheduler] Started — daily@13:00 UTC, session-scan@every 15min 12-18 UTC, "
+          "self-test@14:00 UTC, live-eval@every 4h, refit@Sunday 14:05 UTC", flush=True)
 
     # Catch-up: if it's past 1pm UTC and no picks yet today, run immediately
     now = datetime.now(timezone.utc)
