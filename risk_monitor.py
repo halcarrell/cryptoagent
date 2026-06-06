@@ -49,6 +49,7 @@ MAX_CORRELATION     = 0.75
 CB_LOSS_THRESHOLD   = -8.0
 LOSS_STREAK_PAUSE   = 5
 CORR_LOOKBACK_DAYS  = 30
+MDD_PAUSE_THRESHOLD = 12.0  # % weighted drawdown — from architecture doc blueprint
 
 
 # ----- DB -----
@@ -167,6 +168,36 @@ def get_portfolio_state() -> dict:
     }
 
 
+# ----- Maximum Drawdown computation -----
+def get_strategy_mdd() -> float:
+    """Peak-to-trough max drawdown of cumulative size-weighted P&L (%).
+
+    Implements the MDD formula from the architecture blueprint:
+      W_t = Π(1 + r_i),  M_t = max peak,  DD_t = (W_t - M_t)/M_t
+    Using weighted PnL (pnl_pct × size_pct / 100) per closed trade.
+    Returns 0.0 when no closed trades exist.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT pnl_pct, size_pct FROM paper_trades
+        WHERE status != 'open' ORDER BY closed_at ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        return 0.0
+    equity, peak, mdd = 0.0, 0.0, 0.0
+    for pnl, size in rows:
+        equity += (pnl or 0) * (size or 0) / 100
+        if equity > peak:
+            peak = equity
+        dd = peak - equity
+        if dd > mdd:
+            mdd = dd
+    return round(mdd, 2)
+
+
 # ----- The agent's main entry point -----
 def check_pre_trade_risk(decision) -> Tuple[bool, str]:
     if decision.action != "enter":
@@ -203,9 +234,15 @@ def check_pre_trade_risk(decision) -> Tuple[bool, str]:
     if state["loss_streak"] >= LOSS_STREAK_PAUSE:
         return False, f"{state['loss_streak']} consecutive losses; mandatory review"
 
+    # MDD gate: if cumulative drawdown exceeds threshold, pause until equity recovers
+    mdd = get_strategy_mdd()
+    if mdd >= MDD_PAUSE_THRESHOLD:
+        return False, (f"Strategy max drawdown {mdd:.1f}% reached {MDD_PAUSE_THRESHOLD}% "
+                       f"pause threshold — monitoring only until equity recovers")
+
     return True, (f"approved: exposure {projected:.1f}/{MAX_TOTAL_EXPOSURE}, "
                   f"trades {state['open_count'] + 1}/{MAX_OPEN_TRADES}, "
-                  f"7d P&L {state['rolling_7d_pnl']:+.2f}%")
+                  f"7d P&L {state['rolling_7d_pnl']:+.2f}%, MDD {mdd:.1f}%")
 
 
 # ----- Rejection logging + shadow trade opening -----

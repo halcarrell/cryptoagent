@@ -44,10 +44,13 @@ MAX_SCORE_TO_TRADE  = _CFG.get("risk", {}).get("max_score", None)  # None = no c
 MAX_POSITION_PCT    = _CFG.get("risk", {}).get("max_position_pct", 5.0)
 MIN_RISK_REWARD     = _CFG.get("risk", {}).get("min_risk_reward_gross", 2.0)
 MIN_RISK_REWARD_NET = _CFG.get("risk", {}).get("min_risk_reward_net", 1.6)
-# Minimum hours a trade must be open before a stop can trigger. Cross-sectional
-# momentum has a 7-day optimal holding period; 24h prevents 4H noise from
-# closing a position before its thesis has time to develop.
 MIN_HOLD_HOURS      = _CFG.get("risk", {}).get("min_hold_hours", 24)
+# Extreme volatility filter: if implied stop distance > X% of entry, the
+# market is too volatile for a clean entry (ATR-proxy check from architecture doc).
+MAX_STOP_PCT        = _CFG.get("risk", {}).get("max_stop_pct", 8.0)
+# Signal max age — reject TradingView alerts older than this (prevent acting on
+# stale signals queued during Railway restart or network lag).
+MAX_SIGNAL_AGE_SECS = _CFG.get("risk", {}).get("max_signal_age_secs", 120)
 
 
 @dataclass
@@ -82,6 +85,8 @@ _TRADE_COLUMNS = [
     ("mfe_price",            "REAL"),  # max favorable excursion price
     ("mae_price",            "REAL"),  # max adverse excursion price
     ("time_in_trade_hours",  "REAL"),  # closed_at - opened_at, hours
+    ("surprise_ratio",       "REAL"),  # |realized - expected| / max(|expected|,1); < 0.5 = edge, > 1.5 = luck/anomaly
+    ("outcome_tag",          "TEXT"),  # 'EDGE' | 'EXPECTED' | 'LUCK' | 'ANOMALY'
 ]
 
 
@@ -428,6 +433,19 @@ def decide_trade(alert: dict) -> TradeDecision:
         return TradeDecision("pass", None, symbol, entry, stop, target,
                              0, 0, "Missing entry/stop/target.")
 
+    # Signal latency check — stale signals accumulate during server restarts
+    alert_time_str = alert.get("time")
+    if alert_time_str and alert.get("source") != "session_scan":
+        try:
+            alert_ts = datetime.fromisoformat(alert_time_str.replace("Z", "+00:00"))
+            lag = (datetime.now(timezone.utc) - alert_ts).total_seconds()
+            if lag > MAX_SIGNAL_AGE_SECS:
+                return TradeDecision("pass", side, symbol, entry, stop, target,
+                                     0, 0, f"Signal is {lag:.0f}s old (max {MAX_SIGNAL_AGE_SECS}s) "
+                                           f"— likely queued during server restart.")
+        except Exception:
+            pass
+
     # Risk/reward check
     if side == "long":
         risk, reward = entry - stop, target - entry
@@ -437,6 +455,15 @@ def decide_trade(alert: dict) -> TradeDecision:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0, f"Invalid risk levels (risk={risk}, reward={reward}).")
     rr = reward / risk
+
+    # Extreme-volatility filter: implied ATR too wide = unfavorable entry risk.
+    # Derived from the architecture blueprint's "ATR > 2.5× 20-day MA" concept.
+    stop_pct = risk / entry * 100 if entry > 0 else 0
+    if stop_pct > MAX_STOP_PCT:
+        return TradeDecision("pass", side, symbol, entry, stop, target,
+                             0, 0.1, f"Stop distance {stop_pct:.1f}% exceeds {MAX_STOP_PCT}% "
+                                     f"ceiling — extreme volatility, risk too high.")
+
     # Fee-adjusted: subtract round-trip taker fees (entry + exit) from reward and add to risk
     fee_cost = entry * _SPOT_TAKER_FEE * 2
     rr_net = (reward - fee_cost) / (risk + fee_cost) if (risk + fee_cost) > 0 else 0
@@ -733,6 +760,38 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
     return tid
 
 
+def _surprise_ratio(realized_pnl: float, entry: float, stop: float,
+                    target: float, confidence: float, side: str) -> tuple:
+    """Compute Surprise Ratio from architecture blueprint.
+
+    Expected PnL = confidence × target_pct + (1-confidence) × stop_pct
+    Surprise     = |realized - expected| / max(|expected|, 1)
+
+    Tags: EDGE (< 0.5) — setup worked as designed
+          EXPECTED (0.5–1.5) — within normal variance
+          LUCK (> 1.5, winner) — lucky anomaly, discount in future
+          ANOMALY (> 1.5, loser) — unlucky shock, discount in future
+    """
+    if not entry or not stop or not target:
+        return None, "UNKNOWN"
+    conf = max(0.0, min(1.0, confidence or 0.0))
+    if side == "long":
+        tgt_pct  = (target - entry) / entry * 100
+        stop_pct = (stop   - entry) / entry * 100
+    else:
+        tgt_pct  = (entry - target) / entry * 100
+        stop_pct = (entry - stop)   / entry * 100
+    expected = conf * tgt_pct + (1 - conf) * stop_pct
+    surprise = abs(realized_pnl - expected) / max(abs(expected), 1.0)
+    if surprise < 0.5:
+        tag = "EDGE"
+    elif surprise < 1.5:
+        tag = "EXPECTED"
+    else:
+        tag = "LUCK" if realized_pnl > 0 else "ANOMALY"
+    return round(surprise, 3), tag
+
+
 def evaluate_open_trades_live():
     """Check open paper trades against current live prices (Binance.US → Binance.com).
 
@@ -786,14 +845,19 @@ def evaluate_open_trades_live():
         if status:
             time_in_trade_h = (now - opened_at).total_seconds() / 3600.0
             pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
+            surprise, tag = _surprise_ratio(
+                pnl, entry, t["stop_price"], t["target_price"], t.get("confidence", 0.5), side
+            )
             cur.execute("""
                 UPDATE paper_trades
-                SET status=?, closed_at=?, exit_price=?, pnl_pct=?, time_in_trade_hours=?
+                SET status=?, closed_at=?, exit_price=?, pnl_pct=?,
+                    time_in_trade_hours=?, surprise_ratio=?, outcome_tag=?
                 WHERE trade_id=?
-            """, (status, now.isoformat(), exit_p, pnl, time_in_trade_h, t["trade_id"]))
+            """, (status, now.isoformat(), exit_p, pnl,
+                  time_in_trade_h, surprise, tag, t["trade_id"]))
             closed += 1
             print(f"[live-eval] Trade #{t['trade_id']} {t['symbol']} {status.upper()} "
-                  f"@ {last_price} (entry {entry}), P&L {pnl:+.2f}%", flush=True)
+                  f"P&L {pnl:+.2f}% | surprise={surprise} ({tag})", flush=True)
             try:
                 from notifier import notify_trade_closed
                 notify_trade_closed({
@@ -922,13 +986,17 @@ def evaluate_open_trades():
                     closed_at = now
             time_in_trade_h = (closed_at - opened_at).total_seconds() / 3600.0
             pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
+            surprise, tag = _surprise_ratio(
+                pnl, entry, t["stop_price"], t["target_price"], t.get("confidence", 0.5), t["side"]
+            )
             cur.execute("""
                 UPDATE paper_trades
                 SET status=?, closed_at=?, exit_price=?, pnl_pct=?,
-                    mfe_price=?, mae_price=?, time_in_trade_hours=?
+                    mfe_price=?, mae_price=?, time_in_trade_hours=?,
+                    surprise_ratio=?, outcome_tag=?
                 WHERE trade_id=?
             """, (status, closed_at.isoformat(), exit_p, pnl,
-                  mfe, mae, time_in_trade_h, t["trade_id"]))
+                  mfe, mae, time_in_trade_h, surprise, tag, t["trade_id"]))
             closed += 1
             try:
                 from notifier import notify_trade_closed

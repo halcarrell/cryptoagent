@@ -32,6 +32,8 @@
     "max_position_pct": 5.0,
     "min_score": 2.0,
     "max_score": 2.5,
-    "min_hold_hours": 24
+    "min_hold_hours": 24,
+    "max_stop_pct": 8.0,
+    "max_signal_age_secs": 120
   }
 }
