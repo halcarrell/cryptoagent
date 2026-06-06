@@ -291,8 +291,13 @@ def refit_and_write():
         "previous":       dict(CURRENT_WEIGHTS),
     }
     WEIGHTS_PATH.write_text(json.dumps(payload, indent=2))
-    print(f"\nWritten to {WEIGHTS_PATH}. Sanity-check before applying.")
-    print("Run `python3 weight_refitter.py validate` to see OOS performance.")
+    print(f"\nWritten to {WEIGHTS_PATH}.")
+
+    # Auto-tune min_score / max_score based on live score-bucket analysis
+    try:
+        auto_tune_config()
+    except Exception as e:
+        print(f"[auto-tune] Failed (non-fatal): {e}", flush=True)
 
     # Discord summary
     try:
@@ -314,6 +319,121 @@ def refit_and_write():
         }]})
     except Exception:
         pass
+
+
+# ----- Auto-tune config -----
+def auto_tune_config():
+    """Analyze live score-bucket data and auto-adjust min_score / max_score in
+    the config_overrides DB table.  Called automatically after every refit.
+
+    Rules:
+    - min_score = lowest labeled bucket with avg_3d > 0 AND n >= 10
+    - max_score = highest labeled bucket floor where avg_3d < 0 AND n >= 5
+    - Changes are not applied unless difference >= 0.1 vs current effective value
+    - Posts a Discord notification summarising any changes
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur  = conn.cursor()
+
+    # Ensure the overrides table exists
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS config_overrides (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT,
+            reason TEXT
+        )
+    """)
+    conn.commit()
+
+    # Score-bucket analysis (same logic as /analysis endpoint)
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN composite_score < 1.5 THEN '1.0-1.5'
+                WHEN composite_score < 2.0 THEN '1.5-2.0'
+                WHEN composite_score < 2.5 THEN '2.0-2.5'
+                WHEN composite_score < 3.0 THEN '2.5-3.0'
+                ELSE '3.0+'
+            END AS bucket,
+            COUNT(*),
+            AVG(realized_3d)
+        FROM picks
+        WHERE realized_3d IS NOT NULL
+        GROUP BY bucket
+        ORDER BY MIN(composite_score)
+    """)
+    buckets = [{"bucket": r[0], "n": r[1], "avg_3d": r[2]} for r in cur.fetchall()]
+    total_n = sum(b["n"] for b in buckets)
+
+    if total_n < 20:
+        print("[auto-tune] Not enough pick history yet — skipping.", flush=True)
+        conn.close()
+        return
+
+    BOUNDS = {"1.0-1.5": 1.0, "1.5-2.0": 1.5, "2.0-2.5": 2.0, "2.5-3.0": 2.5, "3.0+": 3.0}
+    ORDER  = list(BOUNDS.keys())
+    bmap   = {b["bucket"]: b for b in buckets}
+
+    # Read current effective values
+    cur.execute("SELECT key, value FROM config_overrides WHERE key IN ('min_score','max_score')")
+    db_vals = {k: json.loads(v) for k, v in cur.fetchall()}
+    cfg_path = Path(__file__).parent / "config.json"
+    cfg_risk = json.loads(cfg_path.read_text()).get("risk", {}) if cfg_path.exists() else {}
+    eff_min = db_vals.get("min_score", cfg_risk.get("min_score", 1.2))
+    eff_max = db_vals.get("max_score", cfg_risk.get("max_score", 2.5))
+
+    # Recommended min: first bucket (ascending) with avg_3d > 0 and n >= 10
+    new_min = eff_min
+    for bk in ORDER:
+        b = bmap.get(bk)
+        if b and b["n"] >= 10 and (b.get("avg_3d") or 0) > 0:
+            new_min = BOUNDS[bk]
+            break
+
+    # Recommended max: walk from top down; cap at first bucket with negative avg_3d
+    new_max = eff_max
+    for bk in reversed(ORDER):
+        b = bmap.get(bk)
+        if b and b["n"] >= 5 and (b.get("avg_3d") or 0) < 0:
+            new_max = BOUNDS[bk]
+        else:
+            break
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    changes = []
+    for key, current, proposed in [("min_score", eff_min, new_min),
+                                    ("max_score",  eff_max, new_max)]:
+        if abs(proposed - current) >= 0.1:
+            reason = (f"Auto-tuned from {total_n} picks: "
+                      f"bucket analysis suggests {key}={proposed:.1f}")
+            cur.execute("""
+                INSERT OR REPLACE INTO config_overrides (key, value, updated_at, reason)
+                VALUES (?, ?, ?, ?)
+            """, (key, json.dumps(proposed), now_iso, reason))
+            changes.append((key, current, proposed))
+
+    conn.commit()
+    conn.close()
+
+    if changes:
+        lines = "\n".join(f"• {k}: **{c}** → **{p}**" for k, c, p in changes)
+        print(f"[auto-tune] Applied: {changes}", flush=True)
+        try:
+            from notifier import _discord_post
+            _discord_post({"embeds": [{
+                "title": "⚙️ Config auto-tuned from score data",
+                "color": 0x1ABC9C,
+                "description": (
+                    f"{lines}\n\n"
+                    f"*Based on {total_n} picks. Takes effect on next signal — no redeploy needed.*"
+                ),
+                "footer": {"text": now_iso[:10]},
+            }]})
+        except Exception:
+            pass
+    else:
+        print("[auto-tune] Config already optimal — no changes applied.", flush=True)
 
 
 # ----- Status -----

@@ -35,6 +35,56 @@ def _load_config():
     return {}
 
 _CFG = _load_config()
+
+
+# ---- Runtime config overrides (auto-tuned by weight_refitter.py) ----
+# The config_overrides table in the DB lets the Sunday refit adjust min_score
+# and max_score based on live score-bucket analysis without a git commit or
+# redeploy. Values here take precedence over config.json at decision time.
+
+_config_override_cache: tuple = (0.0, {})   # (monotonic_ts, {key: value})
+
+
+def _get_config_overrides() -> dict:
+    """Return DB config overrides. Cached 1 hour so DB isn't hit every webhook."""
+    global _config_override_cache
+    import time as _time
+    now = _time.monotonic()
+    ts, cached = _config_override_cache
+    if now - ts < 3600:
+        return cached
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_overrides (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT,
+                reason TEXT
+            )
+        """)
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM config_overrides")
+        overrides = {}
+        for k, v in cur.fetchall():
+            try:
+                overrides[k] = json.loads(v)
+            except Exception:
+                pass
+        conn.close()
+        _config_override_cache = (now, overrides)
+        if overrides:
+            print(f"[config] Active overrides: {overrides}", flush=True)
+        return overrides
+    except Exception:
+        return {}
+
+
+def _effective_score_bounds() -> tuple:
+    """(min_score, max_score) with any auto-tune DB overrides applied."""
+    ov = _get_config_overrides()
+    return (ov.get("min_score", MIN_SCORE_TO_TRADE),
+            ov.get("max_score", MAX_SCORE_TO_TRADE))
 _SPOT_TAKER_FEE = _CFG.get("exchange", {}).get("spot", {}).get("taker_fee", 0.001)
 _PERP_ENABLED   = _CFG.get("exchange", {}).get("perp", {}).get("enabled", True)
 
@@ -483,12 +533,15 @@ def decide_trade(alert: dict) -> TradeDecision:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0, f"Screener picks are {ctx['age_hours']}h old "
                                    f"(last run: {ctx['date']}). Waiting for fresh data.")
-    if ctx["score"] < MIN_SCORE_TO_TRADE:
+    # Use runtime-effective bounds — may be auto-tuned above config.json defaults
+    eff_min, eff_max = _effective_score_bounds()
+
+    if ctx["score"] < eff_min:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.4,
-                             f"Screener score {ctx['score']:.2f} below {MIN_SCORE_TO_TRADE}.")
+                             f"Screener score {ctx['score']:.2f} below {eff_min} threshold.")
 
-    if MAX_SCORE_TO_TRADE and ctx["score"] > MAX_SCORE_TO_TRADE:
+    if eff_max and ctx["score"] > eff_max:
         # Overextended in bear regime → flip to reversal short instead of blocking.
         # Live data: 2.5+ scores averaged -6.78% 3d return; Pine is already showing
         # distribution conditions (RSI overbought, vol spike, red bar). Rather than
@@ -502,19 +555,18 @@ def decide_trade(alert: dict) -> TradeDecision:
             s_target = entry - atr_target_dist      # target BELOW entry for short
             s_rr     = atr_target_dist / atr_stop_dist if atr_stop_dist > 0 else 0
             if s_rr >= MIN_RISK_REWARD:
-                confidence = min(1.0, (ctx["score"] - MAX_SCORE_TO_TRADE) / 0.5)
+                confidence = min(1.0, (ctx["score"] - eff_max) / 0.5)
                 size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)  # half-size — higher risk
                 return TradeDecision(
                     "enter", "short", symbol, entry, s_stop, s_target,
                     size_pct, confidence,
-                    f"{base} score={ctx['score']:.2f} exceeds {MAX_SCORE_TO_TRADE} cap "
-                    f"in bear regime — reversal short. R:R={s_rr:.1f}:1, "
-                    f"live data shows 2.5+ scores avg -6.78% 3d return.",
+                    f"{base} score={ctx['score']:.2f} exceeds {eff_max} cap "
+                    f"in bear regime — reversal short. R:R={s_rr:.1f}:1.",
                 )
         # Not in bear regime or already a short signal: block the overextended long
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.3,
-                             f"Screener score {ctx['score']:.2f} above {MAX_SCORE_TO_TRADE} cap "
+                             f"Screener score {ctx['score']:.2f} above {eff_max} cap "
                              f"— likely overextended/late-stage breakout.")
 
     # Pine Script short signals require bear or sideways regime.
