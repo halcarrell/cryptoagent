@@ -160,7 +160,7 @@ TradingView supports direct order placement when connected to Coinbase Advanced 
 | Always on | Webhook server receives TradingView alerts 24/7 |
 | Always on | Every 4H at :15 UTC — live price evaluation of open paper trades |
 
-Everything runs inside the single Railway web service — no separate cron jobs needed.
+The main web service handles all of the above. A second lightweight Railway service (`cron-monitor`) runs once per day at 09:00 UTC to check alert health and post a Discord summary (green = alerts flowing, yellow = 72h gap, red = server unreachable).
 
 ### Is Everything Healthy?
 
