@@ -27,16 +27,18 @@ use_rsi    = input.bool(false, "RSI not overbought (< 70)",           group=g_fi
 // ===== Short Filters =====
 g_short = "Short Confirmation Filters"
 use_shorts   = input.bool(true,  "Enable short signals",              group=g_short,
-     tooltip="Fires when coin is overextended — server applies score cap + regime check")
+     tooltip="Two setups: (1) overbought bounce — RSI > 60 + VWAP extended + volume; (2) failed EMA50 bounce — price rejected at EMA50 resistance. Server applies regime check.")
 use_s_trend  = input.bool(true,  "EMA50 < EMA200 (downtrend) or flat", group=g_short)
-use_s_rsi    = input.bool(true,  "RSI overbought (> 70)",             group=g_short)
+use_s_rsi    = input.bool(true,  "RSI elevated (> 60) for overbought setup", group=g_short)
 use_s_vwap   = input.bool(true,  "Price extended above VWAP (> 1%)",  group=g_short)
-use_s_vol    = input.bool(true,  "Volume spike (2× avg — distribution)", group=g_short)
+use_s_vol    = input.bool(true,  "Volume spike (1.5× avg — distribution)", group=g_short)
 
 // ===== Risk Settings =====
 g_risk = "Risk"
-atr_stop_mult   = input.float(1.5, "ATR stop multiplier",   group=g_risk)
-atr_target_mult = input.float(3.0, "ATR target multiplier", group=g_risk)
+atr_stop_mult         = input.float(1.5, "ATR stop multiplier",         group=g_risk)
+atr_target_mult       = input.float(3.0, "ATR long target multiplier",  group=g_risk)
+atr_short_target_mult = input.float(4.0, "ATR short target multiplier", group=g_risk,
+     tooltip="Wider target on shorts to capture full bear-market moves. 4.0× ATR gives ~2.67:1 R:R.")
 
 // ===== Session Gate =====
 // Research: 13-17 UTC = peak volume + cleanest momentum (EU/US overlap).
@@ -72,25 +74,35 @@ rsi_ok   = not use_rsi   or rsi_v < 70
 long_entry = trend_ok and vol_ok and vwap_ok and green_ok and rsi_ok and session_ok
 
 // ===== Short Conditions =====
-// Overextended: RSI overbought + price extended above VWAP + distribution volume
-// Server applies score cap check (>2.5) + regime gate before opening any short.
+// Setup 1 — Overbought bounce: RSI > 60, extended above VWAP, distribution volume, red bar.
+// Setup 2 — Failed EMA50 bounce: price tagged EMA50 resistance in last 5 bars, now
+//           rolling back below it on above-average volume. Classic bear market rejection.
+// Server applies score cap check + regime gate before opening any short.
 s_trend_ok = not use_s_trend or ema50 <= ema200
-s_rsi_ok   = not use_s_rsi   or rsi_v > 70
+s_rsi_ok   = not use_s_rsi   or rsi_v > 60
 s_vwap_ok  = not use_s_vwap  or close > vwap_v * 1.01
-s_vol_ok   = not use_s_vol   or volume > vol_avg * 2.0
-red_ok     = close < open  // red bar confirms distribution
+s_vol_ok   = not use_s_vol   or volume > vol_avg * 1.5
+red_ok     = close < open
 
-short_entry = use_shorts and s_trend_ok and s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
-           and session_ok and not long_entry  // never fire both on same bar
+// Failed EMA50 bounce: highest high in last 5 bars reached EMA50 zone, close now below it
+s_bounce_high = ta.highest(high, 5)
+s_bounce_ok   = s_bounce_high >= ema50 * 0.98 and close < ema50
+
+s_overbought = s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
+s_ema_reject = s_bounce_ok and volume > vol_avg * 1.2 and red_ok
+
+short_entry = use_shorts and s_trend_ok and session_ok and not long_entry
+           and (s_overbought or s_ema_reject)
 
 // ===== Stop / Target =====
 long_stop    = close - atr_v * atr_stop_mult
 long_target  = close + atr_v * atr_target_mult
-short_stop   = close + atr_v * atr_stop_mult   // above entry for shorts
-short_target = close - atr_v * atr_target_mult // below entry for shorts
+short_stop   = close + atr_v * atr_stop_mult
+short_target = close - atr_v * atr_short_target_mult  // wider target for shorts
 
-// ===== R:R (fixed by ATR multipliers) =====
-rr_val = atr_target_mult / atr_stop_mult
+// ===== R:R =====
+long_rr  = atr_target_mult       / atr_stop_mult
+short_rr = atr_short_target_mult / atr_stop_mult
 
 // ===== Regime (mirrors server-side three-state gate) =====
 ema_gap_pct  = (ema50 - ema200) / ema200 * 100
@@ -147,7 +159,7 @@ if long_entry
               " @ "       + str.tostring(close,       format.mintick) +
               "  SL "     + str.tostring(stop_pct)   + "%" +
               "  TP +"    + str.tostring(target_pct) + "%" +
-              "  R:R "    + str.tostring(rr_val,      "#.#") + ":1" +
+              "  R:R "    + str.tostring(long_rr,     "#.#") + ":1" +
               "  RSI "    + str.tostring(math.round(rsi_v, 1))
     payload = '{"auth":"'     + auth_token                                              + '"' +
               ',"symbol":"'   + syminfo.ticker                                          + '"' +
@@ -167,7 +179,7 @@ if short_entry
               " @ "       + str.tostring(close,       format.mintick) +
               "  SL +"    + str.tostring(stop_pct)   + "%" +
               "  TP -"    + str.tostring(math.abs(target_pct)) + "%" +
-              "  R:R "    + str.tostring(rr_val,      "#.#") + ":1" +
+              "  R:R "    + str.tostring(short_rr,    "#.#") + ":1" +
               "  RSI "    + str.tostring(math.round(rsi_v, 1))
     payload = '{"auth":"'     + auth_token                                              + '"' +
               ',"symbol":"'   + syminfo.ticker                                          + '"' +
