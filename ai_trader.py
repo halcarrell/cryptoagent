@@ -590,7 +590,7 @@ def decide_trade(alert: dict) -> TradeDecision:
                                      f"too low (need > 0.5). Trade only coins moving "
                                      f"independently of BTC in choppy markets.")
             # Allow at half size — sideways is uncertain
-            confidence = min(1.0, max(0.0, ctx["score"]))
+            confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
             reasoning  = (
                 f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
@@ -606,7 +606,7 @@ def decide_trade(alert: dict) -> TradeDecision:
                                      f"insufficient (need > 1.5). Only strongly "
                                      f"anti-correlated coins qualify in bear markets.")
             # Allow at quarter size — fighting the macro trend, higher risk
-            confidence = min(1.0, max(0.0, ctx["score"]))
+            confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.25, 2)
             reasoning  = (
                 f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
@@ -617,7 +617,7 @@ def decide_trade(alert: dict) -> TradeDecision:
         # Bull regime: fall through to full-size logic below
 
     # Full position sizing (bull regime longs + all shorts that passed above)
-    confidence = min(1.0, max(0.0, ctx["score"]))
+    confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
     size_pct   = round(MAX_POSITION_PCT * confidence, 2)
 
     reasoning = (
