@@ -43,11 +43,14 @@ atr_short_target_mult = input.float(4.0, "ATR short target multiplier", group=g_
 // ===== Session Gate =====
 // Research: 13-17 UTC = peak volume + cleanest momentum (EU/US overlap).
 // 02-06 UTC = lowest volume, widest spreads, most noise (worst entries).
-g_session   = "Session Gate"
-use_session = input.bool(true, "Limit to EU/US peak session (12–18 UTC)", group=g_session,
-     tooltip="Research-backed: 13-17 UTC has peak liquidity and momentum quality. Disable to also catch Asian session moves (noisier).")
-session_hour = hour(time, "UTC")
-session_ok   = not use_session or (session_hour >= 12 and session_hour < 18)
+g_session        = "Session Gate"
+use_session      = input.bool(true,  "Gate longs to EU/US session (12–18 UTC)", group=g_session,
+     tooltip="Research-backed: 13-17 UTC has peak liquidity and momentum quality. Longs need this — shorts don't.")
+use_short_session = input.bool(false, "Gate shorts to session too (default: off)", group=g_session,
+     tooltip="Off = shorts fire any time of day. Bear-market bounces happen in Asian session too.")
+session_hour  = hour(time, "UTC")
+session_ok    = not use_session       or (session_hour >= 12 and session_hour < 18)
+s_session_ok  = not use_short_session or (session_hour >= 12 and session_hour < 18)
 
 // ===== Webhook =====
 g_alert    = "Alert / Webhook"
@@ -91,7 +94,7 @@ s_bounce_ok   = s_bounce_high >= ema50 * 0.98 and close < ema50
 s_overbought = s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
 s_ema_reject = s_bounce_ok and volume > vol_avg * 1.2 and red_ok
 
-short_entry = use_shorts and s_trend_ok and session_ok and not long_entry
+short_entry = use_shorts and s_trend_ok and s_session_ok and not long_entry
            and (s_overbought or s_ema_reject)
 
 // ===== Stop / Target =====
