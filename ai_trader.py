@@ -241,11 +241,25 @@ def get_screener_context(symbol_base: str, date=None):
         (date, symbol_base.upper())
     )
     row = cur.fetchone()
+    if row:
+        conn.close()
+        return {"rank": row[0], "score": row[1], "date": date,
+                "decorrelation": round(row[2] or 0.0, 3)}
+
+    # Not in top picks — check full universe (factor_scores) for short-watch candidates
+    try:
+        cur.execute(
+            "SELECT composite_score FROM factor_scores WHERE pick_date = ? AND symbol = ?",
+            (date, symbol_base.upper())
+        )
+        row2 = cur.fetchone()
+    except Exception:
+        row2 = None
     conn.close()
-    if not row:
+    if not row2:
         return None
-    return {"rank": row[0], "score": row[1], "date": date,
-            "decorrelation": round(row[2] or 0.0, 3)}
+    return {"rank": 999, "score": row2[0], "date": date,
+            "decorrelation": 0.0, "is_short_watch": True}
 
 
 def strip_quote(symbol: str) -> str:
@@ -536,10 +550,15 @@ def decide_trade(alert: dict) -> TradeDecision:
     # Use runtime-effective bounds — may be auto-tuned above config.json defaults
     eff_min, eff_max = _effective_score_bounds()
 
+    is_short_watch = ctx.get("is_short_watch", False)
     if ctx["score"] < eff_min:
-        return TradeDecision("pass", side, symbol, entry, stop, target,
-                             0, 0.4,
-                             f"Screener score {ctx['score']:.2f} below {eff_min} threshold.")
+        # Short signals on weak coins (score < 0.5) are valid — low score confirms bearish setup
+        if side == "short" and ctx["score"] < 0.5:
+            pass  # allow through — weak coin is a good short candidate
+        else:
+            return TradeDecision("pass", side, symbol, entry, stop, target,
+                                 0, 0.4,
+                                 f"Screener score {ctx['score']:.2f} below {eff_min} threshold.")
 
     if eff_max and ctx["score"] > eff_max:
         # Overextended in bear regime → flip to reversal short instead of blocking.
@@ -617,13 +636,21 @@ def decide_trade(alert: dict) -> TradeDecision:
         # Bull regime: fall through to full-size logic below
 
     # Full position sizing (bull regime longs + all shorts that passed above)
-    confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
-    size_pct   = round(MAX_POSITION_PCT * confidence, 2)
-
-    reasoning = (
-        f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, regime={regime}). "
-        f"R:R={rr:.2f}. Sizing {size_pct}% on confidence {confidence:.2f}."
-    )
+    if is_short_watch and side == "short":
+        # Short-watch coins are not primary picks — cap at half size
+        confidence = 0.5
+        size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
+        reasoning  = (
+            f"{base} short-watch (score={ctx['score']:.2f}, regime={regime}). "
+            f"Weak coin confirmed — half size short. R:R={rr:.2f}."
+        )
+    else:
+        confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
+        size_pct   = round(MAX_POSITION_PCT * confidence, 2)
+        reasoning  = (
+            f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, regime={regime}). "
+            f"R:R={rr:.2f}. Sizing {size_pct}% on confidence {confidence:.2f}."
+        )
     return TradeDecision("enter", side, symbol, entry, stop, target,
                          size_pct, confidence, reasoning)
 
