@@ -262,12 +262,11 @@ def start_scheduler():
     scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=5, id="refit")
     # Live trade evaluation: every 4h at :15 past each 4H bar close (0,4,8,12,16,20 UTC)
     scheduler.add_job(_run_live_eval, "cron", hour="0,4,8,12,16,20", minute=15, id="live_eval")
-    # Session-aware opportunity scanner: every 15 min during EU/US peak (11:45-18:00 UTC)
-    # Research: 13-17 UTC has peak liquidity and cleanest momentum moves.
+    # Opportunity scanner: every 15 min during active trading hours (06-22 UTC)
     scheduler.add_job(_run_opportunity_scan, "cron",
-                      hour="11,12,13,14,15,16,17", minute="0,15,30,45", id="opp_scan")
+                      hour="6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22", minute="0,15,30,45", id="opp_scan")
     scheduler.start()
-    print("[scheduler] Started — daily@13:00 UTC, session-scan@every 15min 12-18 UTC, "
+    print("[scheduler] Started — daily@13:00 UTC, session-scan@every 15min 06-23 UTC, "
           "self-test@14:00 UTC, live-eval@every 4h, refit@Sunday 14:05 UTC", flush=True)
 
     # Catch-up: if it's past 1pm UTC and no picks yet today, run immediately
