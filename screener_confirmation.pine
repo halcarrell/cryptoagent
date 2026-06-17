@@ -44,8 +44,8 @@ atr_short_target_mult = input.float(4.0, "ATR short target multiplier", group=g_
 // Research: 13-17 UTC = peak volume + cleanest momentum (EU/US overlap).
 // 02-06 UTC = lowest volume, widest spreads, most noise (worst entries).
 g_session        = "Session Gate"
-use_session      = input.bool(true,  "Gate longs to EU/US session (12–18 UTC)", group=g_session,
-     tooltip="Research-backed: 13-17 UTC has peak liquidity and momentum quality. Longs need this — shorts don't.")
+use_session      = input.bool(false, "Gate longs to EU/US session (12–18 UTC)", group=g_session,
+     tooltip="Off by default — signals fire whenever conditions are met, any time of day. Enable only if you want to reduce overnight noise.")
 use_short_session = input.bool(false, "Gate shorts to session too (default: off)", group=g_session,
      tooltip="Off = shorts fire any time of day. Bear-market bounces happen in Asian session too.")
 session_hour  = hour(time, "UTC")

@@ -101,8 +101,8 @@ def _run_opportunity_scan():
     Active window: 11:45-18:00 UTC (covers EU open through US session close).
     """
     now_utc = datetime.now(timezone.utc)
-    if not (11 <= now_utc.hour < 18):
-        return  # outside peak session — skip
+    if not (6 <= now_utc.hour < 23):
+        return  # skip only the quietest dead hours (23:00–06:00 UTC)
 
     try:
         db  = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))

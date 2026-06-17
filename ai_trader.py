@@ -599,18 +599,18 @@ def decide_trade(alert: dict) -> TradeDecision:
             return TradeDecision("enter", side, symbol, entry, stop, target,
                                  size_pct, confidence, reasoning)
         elif regime == "bear":
-            if decorr < 1.5:
+            if decorr < 0.7:
                 return TradeDecision("pass", side, symbol, entry, stop, target,
                                      0, 0.2,
                                      f"BTC bear regime — {base} decorr={decorr:.2f} "
-                                     f"insufficient (need > 1.5). Only strongly "
-                                     f"anti-correlated coins qualify in bear markets.")
+                                     f"too low (need > 0.7). Coin moves too closely "
+                                     f"with BTC to long in a downtrend.")
             # Allow at quarter size — fighting the macro trend, higher risk
             confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.25, 2)
             reasoning  = (
                 f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
-                f"BTC bear but strongly anti-correlated — quarter size. R:R={rr:.2f}."
+                f"BTC bear — quarter size. R:R={rr:.2f}."
             )
             return TradeDecision("enter", side, symbol, entry, stop, target,
                                  size_pct, confidence, reasoning)
