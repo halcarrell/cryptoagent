@@ -136,43 +136,67 @@ def _run_opportunity_scan():
                 continue
 
             conds = ai_trader.compute_entry_conditions(candles)
-            if not conds["long_ok"]:
+            if not conds["long_ok"] and not conds["short_ok"]:
                 continue
 
             close = conds["close"]
             atr   = conds["atr"]
-            stop   = round(close - atr * 1.5, 8)
-            target = round(close + atr * 3.0, 8)
 
-            alert = {
-                "symbol":   sym_pair,
-                "exchange": "BINANCE",
-                "side":     "long",
-                "entry":    close,
-                "stop":     stop,
-                "target":   target,
-                "rsi":      conds["rsi"],
-                "source":   "session_scan",
-            }
-            alert_id = ai_trader.log_alert(alert)
-            decision = ai_trader.decide_trade(alert)
-            ai_trader.log_decision(alert_id, decision)
-
-            if decision.action == "enter":
-                try:
-                    from risk_monitor import check_pre_trade_risk, log_rejection
-                    approved, risk_reason = check_pre_trade_risk(decision)
-                    if approved:
+            # Long signal
+            if conds["long_ok"]:
+                stop   = round(close - atr * 1.5, 8)
+                target = round(close + atr * 3.0, 8)
+                alert = {
+                    "symbol": sym_pair, "exchange": "BINANCE", "side": "long",
+                    "entry": close, "stop": stop, "target": target,
+                    "rsi": conds["rsi"], "source": "session_scan",
+                }
+                alert_id = ai_trader.log_alert(alert)
+                decision = ai_trader.decide_trade(alert)
+                ai_trader.log_decision(alert_id, decision)
+                if decision.action == "enter":
+                    try:
+                        from risk_monitor import check_pre_trade_risk, log_rejection
+                        approved, risk_reason = check_pre_trade_risk(decision)
+                        if approved:
+                            ai_trader.open_paper_trade(decision, alert_id)
+                            opened += 1
+                            print(f"[scanner] Opened LONG {sym_pair} @ {close} "
+                                  f"(score={pick['score']:.2f}, rsi={conds['rsi']:.1f})", flush=True)
+                        else:
+                            log_rejection(alert_id, decision, risk_reason)
+                    except Exception as e:
+                        print(f"[scanner] Risk check error for {sym_pair}: {e}", flush=True)
                         ai_trader.open_paper_trade(decision, alert_id)
                         opened += 1
-                        print(f"[scanner] Opened {sym_pair} @ {close} "
-                              f"(score={pick['score']:.2f}, rsi={conds['rsi']:.1f})", flush=True)
-                    else:
-                        log_rejection(alert_id, decision, risk_reason)
-                except Exception as e:
-                    print(f"[scanner] Risk check error for {sym_pair}: {e}", flush=True)
-                    ai_trader.open_paper_trade(decision, alert_id)
-                    opened += 1
+
+            # Short signal — inverted stop/target, 4× ATR target for bear moves
+            if conds["short_ok"] and not conds["long_ok"]:
+                stop   = round(close + atr * 1.5, 8)
+                target = round(close - atr * 4.0, 8)
+                alert = {
+                    "symbol": sym_pair, "exchange": "BINANCE", "side": "short",
+                    "entry": close, "stop": stop, "target": target,
+                    "rsi": conds["rsi"], "source": "session_scan",
+                }
+                alert_id = ai_trader.log_alert(alert)
+                decision = ai_trader.decide_trade(alert)
+                ai_trader.log_decision(alert_id, decision)
+                if decision.action == "enter":
+                    try:
+                        from risk_monitor import check_pre_trade_risk, log_rejection
+                        approved, risk_reason = check_pre_trade_risk(decision)
+                        if approved:
+                            ai_trader.open_paper_trade(decision, alert_id)
+                            opened += 1
+                            print(f"[scanner] Opened SHORT {sym_pair} @ {close} "
+                                  f"(score={pick['score']:.2f}, rsi={conds['rsi']:.1f})", flush=True)
+                        else:
+                            log_rejection(alert_id, decision, risk_reason)
+                    except Exception as e:
+                        print(f"[scanner] Risk check error for {sym_pair}: {e}", flush=True)
+                        ai_trader.open_paper_trade(decision, alert_id)
+                        opened += 1
 
         if opened:
             print(f"[scanner] Session scan opened {opened} trade(s).", flush=True)

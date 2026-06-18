@@ -410,13 +410,19 @@ def compute_entry_conditions(candles: list) -> dict:
     green_ok = last_close > last_open
     long_ok  = trend_ok and vwap_ok and vol_ok and green_ok
 
-    # Short conditions
+    # Short conditions — mirrors screener_confirmation.pine (RSI>60, vol 1.5×)
     s_trend_ok = e50 <= e200
-    s_rsi_ok   = rsi > 70
+    s_rsi_ok   = rsi > 60
     s_vwap_ok  = last_close > vwma * 1.01
-    s_vol_ok   = vol_ratio >= 2.0
+    s_vol_ok   = vol_ratio >= 1.5
     red_ok     = last_close < last_open
-    short_ok   = s_trend_ok and s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok
+
+    # Failed EMA50 bounce: highest high in last 5 bars touched EMA50 zone, now closed below
+    highs5     = highs[-5:] if len(highs) >= 5 else highs
+    s_bounce_ok = max(highs5) >= e50 * 0.98 and last_close < e50
+    s_ema_reject = s_bounce_ok and vol_ratio >= 1.2 and red_ok
+
+    short_ok   = s_trend_ok and ((s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok) or s_ema_reject)
 
     return {
         "long_ok":   long_ok,
