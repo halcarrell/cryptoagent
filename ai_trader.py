@@ -116,6 +116,18 @@ class TradeDecision:
     reasoning: str
     decider: str = "rules"                        # 'rules' | 'llm'
     llm_raw_response: Optional[str] = None        # full LLM text, kept for audit
+    # ── v2 Signal Engine fields (§7 of agent instruction) ──────────────────
+    signal_id: Optional[str] = None              # SYMBOL-TF-UTCtimestamp, for de-dup
+    regime: Optional[str] = None                 # RISK_ON | RISK_OFF | CHOP
+    regime_reason: Optional[str] = None          # one-line BTC trend summary
+    catalyst_strength: str = "none"              # none | weak | strong
+    catalyst_note: str = ""                      # headline or "no recent news"
+    relative_strength: str = "inline"            # leader | inline | laggard vs BTC
+    conviction: str = "low"                      # low | med | high
+    thesis: str = ""                             # one plain-English line for Discord
+    invalidation: str = ""                       # single condition that means wrong
+    target_1_price: Optional[float] = None       # first tranche at 2:1 R:R
+    timeframe: str = "1h"
 
     def to_json(self):
         return json.dumps(asdict(self), indent=2)
@@ -130,6 +142,7 @@ _ALERT_COLUMNS = [
     ("decision_reasoning", "TEXT"),    # parsed reasoning (rules text or LLM-extracted)
     ("llm_raw_response",   "TEXT"),    # full LLM text (only set when decider='llm')
     ("funding_rate_8h",    "REAL"),    # Binance perp 8h funding at alert time; NULL if spot-only or fetch failed
+    ("signal_id",          "TEXT"),    # v2: unique signal ID for de-duplication
 ]
 _TRADE_COLUMNS = [
     ("mfe_price",            "REAL"),  # max favorable excursion price
@@ -137,6 +150,15 @@ _TRADE_COLUMNS = [
     ("time_in_trade_hours",  "REAL"),  # closed_at - opened_at, hours
     ("surprise_ratio",       "REAL"),  # |realized - expected| / max(|expected|,1); < 0.5 = edge, > 1.5 = luck/anomaly
     ("outcome_tag",          "TEXT"),  # 'EDGE' | 'EXPECTED' | 'LUCK' | 'ANOMALY'
+    # v2 Signal Engine columns
+    ("signal_id",            "TEXT"),  # links to original alert for CLOSE emit
+    ("regime",               "TEXT"),  # RISK_ON | RISK_OFF | CHOP at entry
+    ("conviction",           "TEXT"),  # low | med | high
+    ("thesis",               "TEXT"),  # one-line thesis posted to Discord
+    ("invalidation",         "TEXT"),  # condition that means the trade is wrong
+    ("target_1_price",       "REAL"),  # first tranche at 2:1 R:R
+    ("trailing_stop",        "REAL"),  # current trailing stop (updated after tranche1)
+    ("tranche1_closed",      "INTEGER"),  # 1 once first 50% is taken off at target_1
 ]
 
 
@@ -438,7 +460,10 @@ def compute_entry_conditions(candles: list) -> dict:
 
 
 # ---------- BTC regime gate ----------
-_btc_regime_cache: tuple = (0.0, True)  # (monotonic_ts, result) — 4H TTL
+# Cache stores (monotonic_ts, regime_str, gap_pct, e50, e200, btc_price)
+_btc_regime_cache: tuple = (0.0, "bull", 0.0, 0.0, 0.0, 0.0)
+
+_V2_REGIME = {"bull": "RISK_ON", "sideways": "CHOP", "bear": "RISK_OFF"}
 
 
 def btc_regime() -> str:
@@ -446,7 +471,7 @@ def btc_regime() -> str:
 
     BULL:     EMA50 > EMA200 by > 2%  → full long signals allowed
     SIDEWAYS: EMAs within 2% of each  → decorrelated longs only (decorr > 0.5)
-    BEAR:     EMA200 > EMA50 by > 2%  → shorts + strongly decorrelated longs (decorr > 1.5)
+    BEAR:     EMA200 > EMA50 by > 2%  → shorts + strongly decorrelated longs
 
     Cached 4 hours. Fails to 'bull' on data unavailability so outages never
     silently block all trading.
@@ -454,18 +479,15 @@ def btc_regime() -> str:
     global _btc_regime_cache
     import time as _time
     now = _time.monotonic()
-    ts, cached = _btc_regime_cache
-    if now - ts < 14_400:
-        # Cache stores str ('bull'/'sideways'/'bear') or legacy bool
-        if isinstance(cached, str):
-            return cached
-        return "bull" if cached else "bear"
+    ts = _btc_regime_cache[0]
+    if now - ts < 14_400 and ts > 0:
+        return _btc_regime_cache[1]
     try:
         since   = datetime.now(timezone.utc) - timedelta(days=36)
         candles = fetch_binance_ohlcv("BTCUSDT", since, "4h")
         closes  = [c["close"] for c in candles]
         if len(closes) < 200:
-            _btc_regime_cache = (now, "bull")
+            _btc_regime_cache = (now, "bull", 0.0, 0.0, 0.0, closes[-1] if closes else 0.0)
             return "bull"
         k50, k200 = 2 / 51, 2 / 201
         e50 = e200 = closes[0]
@@ -476,13 +498,30 @@ def btc_regime() -> str:
         if   gap_pct >  2.0: result = "bull"
         elif gap_pct < -2.0: result = "bear"
         else:                 result = "sideways"
-        _btc_regime_cache = (now, result)
+        _btc_regime_cache = (now, result, gap_pct, e50, e200, closes[-1])
         print(f"[regime] BTC 4H EMA50={e50:.2f} EMA200={e200:.2f} "
               f"gap={gap_pct:+.1f}% → {result.upper()}", flush=True)
         return result
     except Exception:
-        _btc_regime_cache = (_time.monotonic(), "bull")
+        import time as _time2
+        _btc_regime_cache = (_time2.monotonic(), "bull", 0.0, 0.0, 0.0, 0.0)
         return "bull"
+
+
+def btc_regime_detail() -> tuple:
+    """Returns (v2_regime, reason_str) where v2_regime is RISK_ON/RISK_OFF/CHOP.
+
+    Reads from the same 4H cache as btc_regime() — no extra Binance call.
+    """
+    btc_regime()  # ensure cache is warm
+    _, regime_str, gap_pct, e50, e200, price = _btc_regime_cache
+    v2 = _V2_REGIME.get(regime_str, "CHOP")
+    reason = (
+        f"BTC EMA50/200 gap {gap_pct:+.1f}% → {v2}; "
+        f"price ${price:,.0f}; "
+        f"{'EMA50 above' if e50 > e200 else 'EMA50 below'} EMA200"
+    )
+    return v2, reason
 
 
 def btc_regime_bullish() -> bool:
@@ -490,9 +529,115 @@ def btc_regime_bullish() -> bool:
     return btc_regime() == "bull"
 
 
+# ---------- v2 Signal Engine helpers ----------
+
+def generate_signal_id(symbol: str, timeframe: str = "1h", ts: datetime = None) -> str:
+    """Unique per-bar signal ID for webhook de-duplication (v2 schema §7)."""
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    return f"{strip_quote(symbol).upper()}-{timeframe.upper()}-{ts.strftime('%Y%m%dT%H%M%SZ')}"
+
+
+def compute_relative_strength(symbol: str, coin_candles: list) -> str:
+    """Compare coin's 24-bar return to BTC's. Returns 'leader', 'inline', or 'laggard'.
+
+    Uses already-fetched coin candles so no extra Binance call for the coin.
+    """
+    try:
+        if len(coin_candles) < 25:
+            return "inline"
+        btc_candles = fetch_binance_ohlcv("BTCUSDT",
+                                          datetime.now(timezone.utc) - timedelta(hours=210), "1h")
+        if len(btc_candles) < 25:
+            return "inline"
+        n = 24
+        coin_ret = (coin_candles[-1]["close"] - coin_candles[-n]["close"]) / coin_candles[-n]["close"] * 100
+        btc_ret  = (btc_candles[-1]["close"]  - btc_candles[-n]["close"])  / btc_candles[-n]["close"]  * 100
+        diff = coin_ret - btc_ret
+        if diff > 5:
+            return "leader"
+        if diff < -5:
+            return "laggard"
+        return "inline"
+    except Exception:
+        return "inline"
+
+
+# Module-level breadth cache — populated by _run_daily in webhook_server.py
+_breadth_pct: float = 50.0   # % of sampled coins above their 20-bar 4H MA
+
+
+def store_breadth(pct: float) -> None:
+    """Called by the daily screener after computing breadth."""
+    global _breadth_pct
+    _breadth_pct = float(pct)
+
+
+def get_breadth() -> float:
+    """Return cached breadth % (default 50 until first daily run)."""
+    return _breadth_pct
+
+
+def _score_catalyst(symbol: str) -> tuple:
+    """Best-effort catalyst score using news_fetcher. Returns (strength, note)."""
+    try:
+        from news_fetcher import fetch_coin_news
+        news = fetch_coin_news(strip_quote(symbol), hours=24, max_items=3)
+        if not news:
+            return "none", "no recent news"
+        # High-signal keywords that suggest a genuine catalyst
+        strong_kw = {"etf", "listing", "partnership", "mainnet", "upgrade",
+                     "acquisition", "launch", "approval", "regulation", "hack",
+                     "exploit", "lawsuit", "ban", "halving"}
+        titles = " ".join(n.get("title", "").lower() for n in news)
+        if any(kw in titles for kw in strong_kw):
+            return "strong", news[0].get("title", "")[:80]
+        return "weak", news[0].get("title", "")[:80]
+    except Exception:
+        return "none", "news fetch unavailable"
+
+
 # ---------- Decision logic ----------
+
+def _enrich(action, side, symbol, entry, stop, target, size_pct, confidence,
+            reasoning, v2_regime, v2_reason, ctx, rr,
+            rs="inline", cat_str="none", cat_note="") -> TradeDecision:
+    """Attach all v2 Signal Engine fields to an 'enter' decision."""
+    base = strip_quote(symbol)
+    risk = abs(entry - stop) if (entry and stop) else 0
+    t1 = None
+    if risk > 0 and entry is not None:
+        t1 = round(entry + 2 * risk, 8) if side == "long" else round(entry - 2 * risk, 8)
+
+    score = ctx.get("score", 1.0) if ctx else 1.0
+    regime_aligned = (side == "long" and v2_regime == "RISK_ON") or \
+                     (side == "short" and v2_regime == "RISK_OFF")
+    factors   = sum([regime_aligned, cat_str == "strong",
+                     (side == "long" and rs == "leader") or (side == "short" and rs == "laggard"),
+                     score >= 2.0])
+    conviction = "high" if factors >= 3 else "med" if factors >= 1 else "low"
+
+    rs_text  = {"leader": "leading BTC", "laggard": "lagging BTC"}.get(rs, "inline with BTC")
+    cat_text = f"; catalyst: {cat_note[:60]}" if cat_note and cat_note != "no recent news" else ""
+    thesis   = (f"{base} {'long' if side == 'long' else 'short'} — score={score:.2f}, "
+                f"{v2_regime}, {rs_text}, R:R {rr:.1f}:1{cat_text}")
+    inv = (f"Price closes below {stop:.6g}" if side == "long"
+           else f"Price closes above {stop:.6g}")
+
+    return TradeDecision(
+        action, side, symbol, entry, stop, target, size_pct, confidence, reasoning,
+        signal_id=generate_signal_id(symbol),
+        regime=v2_regime, regime_reason=v2_reason,
+        catalyst_strength=cat_str, catalyst_note=cat_note,
+        relative_strength=rs, conviction=conviction,
+        thesis=thesis, invalidation=inv, target_1_price=t1,
+    )
+
+
 def decide_trade(alert: dict) -> TradeDecision:
-    """Rules-based decision. Replace with LLM for fancier reasoning."""
+    """Rules-based decision following the v2 top-down hierarchy:
+    Regime → Catalyst → Relative Strength → Structure/Entry.
+    """
     symbol = alert.get("symbol", "")
     side   = alert.get("side", "long")
     entry  = alert.get("entry")
@@ -516,7 +661,7 @@ def decide_trade(alert: dict) -> TradeDecision:
         except Exception:
             pass
 
-    # Risk/reward check
+    # Risk/reward check (v2: min 2.5:1 gross)
     if side == "long":
         risk, reward = entry - stop, target - entry
     else:
@@ -526,15 +671,12 @@ def decide_trade(alert: dict) -> TradeDecision:
                              0, 0, f"Invalid risk levels (risk={risk}, reward={reward}).")
     rr = reward / risk
 
-    # Extreme-volatility filter: implied ATR too wide = unfavorable entry risk.
-    # Derived from the architecture blueprint's "ATR > 2.5× 20-day MA" concept.
     stop_pct = risk / entry * 100 if entry > 0 else 0
     if stop_pct > MAX_STOP_PCT:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.1, f"Stop distance {stop_pct:.1f}% exceeds {MAX_STOP_PCT}% "
                                      f"ceiling — extreme volatility, risk too high.")
 
-    # Fee-adjusted: subtract round-trip taker fees (entry + exit) from reward and add to risk
     fee_cost = entry * _SPOT_TAKER_FEE * 2
     rr_net = (reward - fee_cost) / (risk + fee_cost) if (risk + fee_cost) > 0 else 0
     if rr < MIN_RISK_REWARD or rr_net < MIN_RISK_REWARD_NET:
@@ -543,9 +685,19 @@ def decide_trade(alert: dict) -> TradeDecision:
                              f"R:R={rr:.2f} (net={rr_net:.2f}) below "
                              f"{MIN_RISK_REWARD}/{MIN_RISK_REWARD_NET} minimum.")
 
-    # Cross-reference with screener picks
+    # STEP 1 — REGIME (v2 hierarchy)
+    regime    = btc_regime()                    # 'bull' | 'sideways' | 'bear'
+    v2_regime, v2_reason = btc_regime_detail()  # RISK_ON | CHOP | RISK_OFF + reason
+
+    # STEP 2 — CATALYST (best-effort via news_fetcher)
     base = strip_quote(symbol)
-    ctx  = get_screener_context(base)
+    cat_str, cat_note = _score_catalyst(base)
+
+    # STEP 3 — RELATIVE STRENGTH (from alert's pre-fetched candles if available)
+    rs = alert.get("relative_strength", "inline")
+
+    # Cross-reference with screener picks
+    ctx = get_screener_context(base)
     if not ctx:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.3, f"{base} not in today's screener top 10.")
@@ -553,112 +705,87 @@ def decide_trade(alert: dict) -> TradeDecision:
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0, f"Screener picks are {ctx['age_hours']}h old "
                                    f"(last run: {ctx['date']}). Waiting for fresh data.")
-    # Use runtime-effective bounds — may be auto-tuned above config.json defaults
-    eff_min, eff_max = _effective_score_bounds()
 
+    eff_min, eff_max = _effective_score_bounds()
     is_short_watch = ctx.get("is_short_watch", False)
+
     if ctx["score"] < eff_min:
-        # Short signals on weak coins (score < 0.5) are valid — low score confirms bearish setup
         if side == "short" and ctx["score"] < 0.5:
-            pass  # allow through — weak coin is a good short candidate
+            pass  # weak coin is a valid short candidate
         else:
             return TradeDecision("pass", side, symbol, entry, stop, target,
                                  0, 0.4,
                                  f"Screener score {ctx['score']:.2f} below {eff_min} threshold.")
 
     if eff_max and ctx["score"] > eff_max:
-        # Overextended in bear regime → flip to reversal short instead of blocking.
-        # Live data: 2.5+ scores averaged -6.78% 3d return; Pine is already showing
-        # distribution conditions (RSI overbought, vol spike, red bar). Rather than
-        # discarding the signal, ride the reversal.
-        regime_bear = not btc_regime_bullish()
-        if side == "long" and regime_bear:
-            # Mirror ATR distances to create short stop/target
-            atr_stop_dist   = abs(entry - stop)    # = ATR * stop_mult
-            atr_target_dist = abs(target - entry)  # = ATR * target_mult
-            s_stop   = entry + atr_stop_dist        # stop ABOVE entry for short
-            s_target = entry - atr_target_dist      # target BELOW entry for short
-            s_rr     = atr_target_dist / atr_stop_dist if atr_stop_dist > 0 else 0
+        # Overextended — flip to reversal short in bear regime
+        if side == "long" and regime in ("bear", "sideways"):
+            atr_d = abs(entry - stop)
+            s_stop, s_target = entry + atr_d, entry - atr_d
+            s_rr = atr_d / atr_d if atr_d > 0 else 0
             if s_rr >= MIN_RISK_REWARD:
                 confidence = min(1.0, (ctx["score"] - eff_max) / 0.5)
-                size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)  # half-size — higher risk
-                return TradeDecision(
-                    "enter", "short", symbol, entry, s_stop, s_target,
-                    size_pct, confidence,
-                    f"{base} score={ctx['score']:.2f} exceeds {eff_max} cap "
-                    f"in bear regime — reversal short. R:R={s_rr:.1f}:1.",
-                )
-        # Not in bear regime or already a short signal: block the overextended long
+                size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
+                reasoning  = (f"{base} score={ctx['score']:.2f} exceeds {eff_max} cap "
+                               f"in {regime} — reversal short. R:R={s_rr:.1f}:1.")
+                return _enrich("enter", "short", symbol, entry, s_stop, s_target,
+                               size_pct, confidence, reasoning,
+                               v2_regime, v2_reason, ctx, s_rr, rs, cat_str, cat_note)
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.3,
-                             f"Screener score {ctx['score']:.2f} above {eff_max} cap "
-                             f"— likely overextended/late-stage breakout.")
+                             f"Screener score {ctx['score']:.2f} above {eff_max} cap.")
 
-    # Pine Script short signals require bear or sideways regime.
-    # Server-generated reversal shorts (above) already checked this.
-    regime = btc_regime()
+    # v2 §8 guardrail: never short in RISK_ON, never long in RISK_OFF (except decorr exception below)
     if side == "short" and regime == "bull":
         return TradeDecision("pass", side, symbol, entry, stop, target,
-                             0, 0.2, "BTC regime is bull — skipping short signal.")
+                             0, 0.2, "RISK_ON — no shorts permitted.")
 
-    # Three-state long regime gate — different rules per regime:
-    #   BULL:     full position — momentum trades work best here
-    #   SIDEWAYS: decorrelated coins only at half size (coins moving independently)
-    #   BEAR:     strongly decorrelated coins only at quarter size
+    # STEP 4 — STRUCTURE / SIZE by regime
     if side == "long":
         decorr = ctx.get("decorrelation", 0.0)
         if regime == "sideways":
             if decorr < 0.5:
                 return TradeDecision("pass", side, symbol, entry, stop, target,
                                      0, 0.2,
-                                     f"BTC sideways regime — {base} decorr={decorr:.2f} "
-                                     f"too low (need > 0.5). Trade only coins moving "
-                                     f"independently of BTC in choppy markets.")
-            # Allow at half size — sideways is uncertain
+                                     f"CHOP regime — {base} decorr={decorr:.2f} "
+                                     f"too low (need >0.5). Only trade decorrelated coins in chop.")
             confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
-            reasoning  = (
-                f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
-                f"BTC sideways — half size. R:R={rr:.2f}."
-            )
-            return TradeDecision("enter", side, symbol, entry, stop, target,
-                                 size_pct, confidence, reasoning)
-        elif regime == "bear":
+            reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} decorr={decorr:.2f}. "
+                          f"CHOP — half size. R:R={rr:.2f}.")
+            return _enrich("enter", side, symbol, entry, stop, target,
+                           size_pct, confidence, reasoning,
+                           v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
+
+        if regime == "bear":
             if decorr < 0.7:
                 return TradeDecision("pass", side, symbol, entry, stop, target,
                                      0, 0.2,
-                                     f"BTC bear regime — {base} decorr={decorr:.2f} "
-                                     f"too low (need > 0.7). Coin moves too closely "
-                                     f"with BTC to long in a downtrend.")
-            # Allow at quarter size — fighting the macro trend, higher risk
+                                     f"RISK_OFF — {base} decorr={decorr:.2f} "
+                                     f"too low (need >0.7). Coin too correlated to BTC to long.")
             confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.25, 2)
-            reasoning  = (
-                f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, decorr={decorr:.2f}). "
-                f"BTC bear — quarter size. R:R={rr:.2f}."
-            )
-            return TradeDecision("enter", side, symbol, entry, stop, target,
-                                 size_pct, confidence, reasoning)
-        # Bull regime: fall through to full-size logic below
+            reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} decorr={decorr:.2f}. "
+                          f"RISK_OFF — quarter size. R:R={rr:.2f}.")
+            return _enrich("enter", side, symbol, entry, stop, target,
+                           size_pct, confidence, reasoning,
+                           v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
 
-    # Full position sizing (bull regime longs + all shorts that passed above)
+    # Full-size: bull-regime longs + all shorts that cleared the regime gate
     if is_short_watch and side == "short":
-        # Short-watch coins are not primary picks — cap at half size
         confidence = 0.5
         size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
-        reasoning  = (
-            f"{base} short-watch (score={ctx['score']:.2f}, regime={regime}). "
-            f"Weak coin confirmed — half size short. R:R={rr:.2f}."
-        )
+        reasoning  = (f"{base} short-watch score={ctx['score']:.2f} regime={regime}. "
+                      f"Weak coin — half size. R:R={rr:.2f}.")
     else:
         confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
         size_pct   = round(MAX_POSITION_PCT * confidence, 2)
-        reasoning  = (
-            f"{base} #{ctx['rank']} (score={ctx['score']:.2f}, regime={regime}). "
-            f"R:R={rr:.2f}. Sizing {size_pct}% on confidence {confidence:.2f}."
-        )
-    return TradeDecision("enter", side, symbol, entry, stop, target,
-                         size_pct, confidence, reasoning)
+        reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} regime={regime}. "
+                      f"R:R={rr:.2f}. Size={size_pct}% conf={confidence:.2f}.")
+
+    return _enrich("enter", side, symbol, entry, stop, target,
+                   size_pct, confidence, reasoning,
+                   v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
 
 
 def decide_trade_with_llm(alert: dict, anthropic_api_key: str) -> TradeDecision:
@@ -790,17 +917,15 @@ def log_alert(alert: dict) -> int:
 
 
 def log_decision(alert_id: int, d: TradeDecision):
-    """Persist decider output back onto the alert row. Called for every
-    decision — entry OR pass. Without this, 'pass' decisions vanish and we
-    can never measure how often the LLM disagrees with the rules, or what
-    it was reasoning about when it did."""
+    """Persist decider output back onto the alert row (entry and pass both logged)."""
     conn = init_trading_tables()
     cur  = conn.cursor()
     cur.execute("""
         UPDATE alerts
-        SET decider = ?, decision_action = ?, decision_reasoning = ?, llm_raw_response = ?
+        SET decider = ?, decision_action = ?, decision_reasoning = ?,
+            llm_raw_response = ?, signal_id = ?
         WHERE alert_id = ?
-    """, (d.decider, d.action, d.reasoning, d.llm_raw_response, alert_id))
+    """, (d.decider, d.action, d.reasoning, d.llm_raw_response, d.signal_id, alert_id))
     conn.commit()
     conn.close()
 
@@ -813,12 +938,16 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
     cur.execute("""
         INSERT INTO paper_trades
         (alert_id, opened_at, symbol, side, entry_price, stop_price, target_price,
-         size_pct, confidence, reasoning, status)
-        VALUES (?,?,?,?,?,?,?,?,?,?, 'open')
+         size_pct, confidence, reasoning, status,
+         signal_id, regime, conviction, thesis, invalidation,
+         target_1_price, trailing_stop, tranche1_closed)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'open', ?,?,?,?,?,?,?,0)
     """, (
         alert_id, datetime.now(timezone.utc).isoformat(),
         d.symbol, d.side, d.entry, d.stop, d.target,
         d.size_pct, d.confidence, d.reasoning,
+        d.signal_id, d.regime, d.conviction, d.thesis, d.invalidation,
+        d.target_1_price, d.stop,   # trailing_stop starts at original stop
     ))
     tid = cur.lastrowid
     conn.commit()
@@ -838,6 +967,12 @@ def open_paper_trade(d: TradeDecision, alert_id: int):
             "trade_id": tid, "symbol": d.symbol, "side": d.side,
             "entry_price": d.entry, "stop_price": d.stop, "target_price": d.target,
             "size_pct": d.size_pct, "confidence": d.confidence, "reasoning": d.reasoning,
+            # v2 fields
+            "signal_id": d.signal_id, "regime": d.regime, "regime_reason": d.regime_reason,
+            "conviction": d.conviction, "thesis": d.thesis, "invalidation": d.invalidation,
+            "catalyst_strength": d.catalyst_strength, "catalyst_note": d.catalyst_note,
+            "relative_strength": d.relative_strength,
+            "target_1_price": d.target_1_price,
         }, news=news)
     except Exception as e:
         print(f"[notifier] Trade open notify failed for #{tid}: {e}", flush=True)
@@ -878,11 +1013,13 @@ def _surprise_ratio(realized_pnl: float, entry: float, stop: float,
 
 
 def evaluate_open_trades_live():
-    """Check open paper trades against current live prices (Binance.US → Binance.com).
+    """Check open paper trades against current live prices.
 
-    Runs every 4 hours via the scheduler so stop/target hits are caught intraday
-    rather than waiting for the next morning's daily snapshot run.
-    Skips trades opened less than 30 minutes ago to avoid closing on entry noise.
+    v2 behaviour:
+    - Tranche 1 (50 %) closes at target_1_price (2:1 R:R). Stop moves to breakeven.
+    - Remainder trails by implied 1.5×ATR (derived from original stop distance).
+    - Full target_price closes remaining 50 %.
+    - CLOSE signal is posted to Discord on every closure so followers know to exit.
     """
     conn = init_trading_tables()
     cur  = conn.cursor()
@@ -893,15 +1030,11 @@ def evaluate_open_trades_live():
     closed = 0
     now    = datetime.now(timezone.utc)
     for t in rows:
-        # Don't evaluate trades younger than MIN_HOLD_HOURS. Cross-sectional
-        # momentum needs time to develop; closing on the first 4H wiggle wastes
-        # the entry signal. Hard floor of 30 min to handle clock skew.
         try:
             opened_at = datetime.fromisoformat(t["opened_at"])
             if opened_at.tzinfo is None:
                 opened_at = opened_at.replace(tzinfo=timezone.utc)
-            min_secs = max(MIN_HOLD_HOURS * 3600, 1800)
-            if (now - opened_at).total_seconds() < min_secs:
+            if (now - opened_at).total_seconds() < max(MIN_HOLD_HOURS * 3600, 1800):
                 continue
         except (TypeError, ValueError):
             continue
@@ -910,28 +1043,82 @@ def evaluate_open_trades_live():
         if last_price is None:
             continue
 
-        side   = t["side"]
-        entry  = t["entry_price"]
-        stop_p = t["stop_price"]
-        tgt_p  = t["target_price"]
+        side      = t["side"]
+        entry     = t["entry_price"]
+        orig_stop = t["stop_price"]
+        tgt_p     = t["target_price"]
+        t1_p      = t.get("target_1_price")          # first tranche (2:1)
+        trail_p   = t.get("trailing_stop") or orig_stop
+        t1_closed = bool(t.get("tranche1_closed"))
 
+        # Implied ATR from original stop distance (stored as 1.5×ATR)
+        atr = abs(entry - orig_stop) / 1.5 if orig_stop else 0
+
+        # ── Step A: update trailing stop after tranche1 ──────────────────────
+        if t1_closed and atr > 0:
+            if side == "long":
+                new_trail = last_price - atr * 1.5
+                # ratchet up only; never below breakeven
+                new_trail = max(new_trail, entry)
+                if new_trail > trail_p:
+                    trail_p = new_trail
+                    cur.execute("UPDATE paper_trades SET trailing_stop=? WHERE trade_id=?",
+                                (trail_p, t["trade_id"]))
+            else:
+                new_trail = last_price + atr * 1.5
+                new_trail = min(new_trail, entry)  # ratchet down; never above breakeven
+                if new_trail < trail_p:
+                    trail_p = new_trail
+                    cur.execute("UPDATE paper_trades SET trailing_stop=? WHERE trade_id=?",
+                                (trail_p, t["trade_id"]))
+
+        # ── Step B: check tranche1 hit ────────────────────────────────────────
+        if not t1_closed and t1_p:
+            t1_hit = (side == "long" and last_price >= t1_p) or \
+                     (side == "short" and last_price <= t1_p)
+            if t1_hit:
+                t1_pnl = (t1_p / entry - 1) * 100 if side == "long" else (entry / t1_p - 1) * 100
+                # Move trailing stop to breakeven
+                cur.execute("""
+                    UPDATE paper_trades
+                    SET tranche1_closed=1, trailing_stop=?
+                    WHERE trade_id=?
+                """, (entry, t["trade_id"]))
+                trail_p   = entry
+                t1_closed = True
+                print(f"[live-eval] #{t['trade_id']} {t['symbol']} T1 hit @ {t1_p:.6g} "
+                      f"(+{t1_pnl:.2f}%) — stop moved to breakeven.", flush=True)
+                try:
+                    from notifier import notify_trade_closed
+                    notify_trade_closed({
+                        "trade_id": t["trade_id"], "symbol": t["symbol"],
+                        "status": "tranche1", "pnl_pct": t1_pnl,
+                        "entry_price": entry, "exit_price": t1_p,
+                        "size_pct": (t.get("size_pct") or 0) * 0.5,
+                        "signal_id": t.get("signal_id"),
+                        "thesis": t.get("thesis", ""),
+                    })
+                except Exception as e:
+                    print(f"[notifier] T1 notify failed #{t['trade_id']}: {e}", flush=True)
+
+        # ── Step C: check full close (trailing stop or full target) ──────────
         status, exit_p = None, None
         if side == "long":
-            if last_price <= stop_p:
-                status, exit_p = "stopped", stop_p
+            if last_price <= trail_p:
+                status, exit_p = "stopped", trail_p
             elif last_price >= tgt_p:
                 status, exit_p = "target", tgt_p
         else:
-            if last_price >= stop_p:
-                status, exit_p = "stopped", stop_p
+            if last_price >= trail_p:
+                status, exit_p = "stopped", trail_p
             elif last_price <= tgt_p:
                 status, exit_p = "target", tgt_p
 
         if status:
-            time_in_trade_h = (now - opened_at).total_seconds() / 3600.0
+            time_in_h = (now - opened_at).total_seconds() / 3600.0
             pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
             surprise, tag = _surprise_ratio(
-                pnl, entry, t["stop_price"], t["target_price"], t.get("confidence", 0.5), side
+                pnl, entry, orig_stop, tgt_p, t.get("confidence", 0.5), side
             )
             cur.execute("""
                 UPDATE paper_trades
@@ -939,20 +1126,25 @@ def evaluate_open_trades_live():
                     time_in_trade_hours=?, surprise_ratio=?, outcome_tag=?
                 WHERE trade_id=?
             """, (status, now.isoformat(), exit_p, pnl,
-                  time_in_trade_h, surprise, tag, t["trade_id"]))
+                  time_in_h, surprise, tag, t["trade_id"]))
             closed += 1
-            print(f"[live-eval] Trade #{t['trade_id']} {t['symbol']} {status.upper()} "
-                  f"P&L {pnl:+.2f}% | surprise={surprise} ({tag})", flush=True)
+            label = "trailing stop" if (t1_closed and status == "stopped") else status
+            print(f"[live-eval] #{t['trade_id']} {t['symbol']} {label.upper()} "
+                  f"P&L {pnl:+.2f}% | {tag}", flush=True)
             try:
                 from notifier import notify_trade_closed
                 notify_trade_closed({
                     "trade_id": t["trade_id"], "symbol": t["symbol"],
                     "status": status, "pnl_pct": pnl,
                     "entry_price": entry, "exit_price": exit_p,
-                    "size_pct": t["size_pct"],
+                    "size_pct": t.get("size_pct"),
+                    "signal_id": t.get("signal_id"),
+                    "thesis": t.get("thesis", ""),
+                    "outcome_tag": tag,
+                    "tranche1_already_closed": t1_closed,
                 })
             except Exception as e:
-                print(f"[notifier] Trade close notify failed for #{t['trade_id']}: {e}", flush=True)
+                print(f"[notifier] Close notify failed #{t['trade_id']}: {e}", flush=True)
 
     conn.commit()
     conn.close()

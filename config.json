@@ -27,8 +27,8 @@
     "ath_within_pct": 20.0
   },
   "risk": {
-    "min_risk_reward_gross": 2.0,
-    "min_risk_reward_net": 1.6,
+    "min_risk_reward_gross": 2.5,
+    "min_risk_reward_net": 2.0,
     "max_position_pct": 5.0,
     "min_score": 1.0,
     "max_score": 3.0,

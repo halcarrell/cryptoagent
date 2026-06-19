@@ -250,48 +250,71 @@ def _binance_us_url(symbol: str) -> str:
 
 
 def notify_trade_opened(trade: dict, news: list = None) -> None:
-    sym    = trade.get("symbol", "?")
-    side   = (trade.get("side") or "long").upper()
-    entry  = trade.get("entry_price") or 0
-    stop   = trade.get("stop_price")  or 0
-    target = trade.get("target_price") or 0
-    size   = trade.get("size_pct") or 0
-    conf   = trade.get("confidence") or 0
-    reason = trade.get("reasoning", "")
-    tid    = trade.get("trade_id", "?")
+    sym        = trade.get("symbol", "?")
+    side       = (trade.get("side") or "long").upper()
+    entry      = trade.get("entry_price") or 0
+    stop       = trade.get("stop_price")  or 0
+    target     = trade.get("target_price") or 0
+    t1         = trade.get("target_1_price")
+    size       = trade.get("size_pct") or 0
+    conf       = trade.get("confidence") or 0
+    tid        = trade.get("trade_id", "?")
+    signal_id  = trade.get("signal_id", "")
+    regime     = trade.get("regime", "")
+    conviction = (trade.get("conviction") or "low").upper()
+    thesis     = trade.get("thesis", "")
+    inv        = trade.get("invalidation", "")
+    cat_str    = trade.get("catalyst_strength", "none")
+    cat_note   = trade.get("catalyst_note", "")
+    rs         = trade.get("relative_strength", "inline")
 
-    # Price maths
-    risk        = abs(entry - stop)
-    reward      = abs(target - entry)
-    rr          = reward / risk if risk else 0
-    stop_pct    = (stop   - entry) / entry * 100 if entry else 0
-    target_pct  = (target - entry) / entry * 100 if entry else 0
+    risk   = abs(entry - stop)
+    reward = abs(target - entry)
+    rr     = reward / risk if risk else 0
+    stop_pct   = (stop   - entry) / entry * 100 if entry else 0
+    target_pct = (target - entry) / entry * 100 if entry else 0
 
-    # Dollar + quantity sizing
     dollar_size = PORTFOLIO_USD * size / 100
     quantity    = dollar_size / entry if entry else 0
 
-    # Format prices — more decimals for sub-$1 coins
     def fmt(p): return f"${p:,.6g}"
 
     action_emoji = "🟢" if side == "LONG" else "🔴"
     action_word  = "BUY" if side == "LONG" else "SELL SHORT"
-    url          = _binance_us_url(sym)
-    now          = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    url  = _binance_us_url(sym)
+    now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    reason_line = f"\n*{reason[:180]}*" if reason else ""
+    # Conviction badge
+    conv_emoji = {"HIGH": "🔥", "MED": "⚡", "LOW": "💧"}.get(conviction, "💧")
+    regime_icon = {"RISK_ON": "📈", "RISK_OFF": "📉", "CHOP": "↔️"}.get(regime, "")
+    rs_icon = {"leader": "🚀", "laggard": "🐌"}.get(rs, "➡️")
 
-    # Mobile-friendly layout: most important info first, action button prominent
     description = (
-        f"Entry **{fmt(entry)}**  •  R:R **{rr:.1f}:1**  •  Size **${dollar_size:,.0f}**\n"
-        f"Stop **{fmt(stop)}** `{stop_pct:+.1f}%`  →  Target **{fmt(target)}** `{target_pct:+.1f}%`\n"
-        f"Confidence **{conf:.0%}**  •  ~{quantity:,.4g} units\n\n"
-        f"## [🚀 Execute on Binance.US →]({url})\n"
-        f"*{action_word} {sym} at market, set SL {fmt(stop)}, TP {fmt(target)}*"
-        f"{reason_line}"
+        f"{conv_emoji} **{conviction} conviction** · {regime_icon} {regime} · {rs_icon} {rs}\n\n"
+        f"*{thesis}*\n\n"
+        f"Entry **{fmt(entry)}** · R:R **{rr:.1f}:1** · Size **${dollar_size:,.0f}**\n"
+        f"Stop **{fmt(stop)}** `{stop_pct:+.1f}%` → "
     )
+    if t1:
+        t1_pct = (t1 - entry) / entry * 100 if side == "LONG" else (entry - t1) / entry * 100
+        description += f"T1 **{fmt(t1)}** `{t1_pct:+.1f}%` → "
+    description += (
+        f"Target **{fmt(target)}** `{target_pct:+.1f}%`\n"
+        f"Conf **{conf:.0%}** · ~{quantity:,.4g} units\n\n"
+        f"## [🚀 Execute on Binance.US →]({url})\n"
+        f"*{action_word} {sym} at market · SL {fmt(stop)} · TP {fmt(target)}*"
+    )
+    if inv:
+        description += f"\n⚠️ **Exit if:** {inv}"
 
     fields = []
+    if cat_str != "none" and cat_note:
+        cat_emoji = "💥" if cat_str == "strong" else "📌"
+        fields.append({
+            "name": f"{cat_emoji} Catalyst ({cat_str})",
+            "value": cat_note[:200],
+            "inline": False,
+        })
     if news:
         try:
             from news_fetcher import format_news_lines
@@ -305,11 +328,15 @@ def notify_trade_opened(trade: dict, news: list = None) -> None:
         except Exception:
             pass
 
+    footer_parts = [f"Portfolio ${PORTFOLIO_USD:,.0f}", f"Size {size:.1f}%", now]
+    if signal_id:
+        footer_parts.append(f"ID: {signal_id}")
+
     embed = {
         "title":       f"{action_emoji} PAPER {action_word} — {sym}  (trade #{tid})",
         "color":       0x2ECC71 if side == "LONG" else 0xE74C3C,
         "description": description,
-        "footer":      {"text": f"Portfolio ${PORTFOLIO_USD:,.0f}  •  Size {size:.1f}%  •  {now}"},
+        "footer":      {"text": "  •  ".join(footer_parts)},
     }
     if fields:
         embed["fields"] = fields
@@ -318,33 +345,59 @@ def notify_trade_opened(trade: dict, news: list = None) -> None:
 
 
 def notify_trade_closed(trade: dict) -> None:
-    sym    = trade.get("symbol", "?")
-    status = trade.get("status", "closed").upper()
-    pnl    = trade.get("pnl_pct", 0) or 0
-    entry  = trade.get("entry_price") or 0
-    exit_p = trade.get("exit_price")  or 0
-    size   = trade.get("size_pct") or 0
-    tid    = trade.get("trade_id", "?")
+    sym       = trade.get("symbol", "?")
+    status    = trade.get("status", "closed").upper()
+    pnl       = trade.get("pnl_pct", 0) or 0
+    entry     = trade.get("entry_price") or 0
+    exit_p    = trade.get("exit_price")  or 0
+    size      = trade.get("size_pct") or 0
+    tid       = trade.get("trade_id", "?")
+    signal_id = trade.get("signal_id", "")
+    thesis    = trade.get("thesis", "")
+    tag       = trade.get("outcome_tag", "")
+    t1_done   = trade.get("tranche1_already_closed", False)
+    now       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    dollar_pnl = PORTFOLIO_USD * size / 100 * pnl / 100
-    hit_target = status == "TARGET"
-    emoji      = "✅" if hit_target else "🛑"
-    color      = 0x2ECC71 if hit_target else 0xE74C3C
-    outcome    = "Target hit — take profit" if hit_target else "Stop hit — loss taken"
-    now        = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # Tranche1 partial close has its own presentation
+    is_tranche1 = (status == "TRANCHE1")
+    actual_size = size * 0.5 if is_tranche1 else size
+    dollar_pnl  = PORTFOLIO_USD * actual_size / 100 * pnl / 100
 
+    if is_tranche1:
+        emoji, color = "🎯", 0x27AE60
+        title   = f"🎯 PARTIAL EXIT (50%) — {sym}  (#{tid})"
+        outcome = "First target hit — 50% closed, stop moved to breakeven, trailing remainder"
+    elif status == "TARGET":
+        emoji, color = "✅", 0x2ECC71
+        title   = f"✅ TARGET HIT — {sym}  (#{tid})"
+        outcome = "Full target reached" + (" — second tranche" if t1_done else "")
+    else:
+        emoji, color = "🛑", 0xE74C3C
+        is_trail = t1_done and status == "STOPPED"
+        title    = f"🛑 {'TRAILING STOP' if is_trail else 'STOP HIT'} — {sym}  (#{tid})"
+        outcome  = ("Trailing stop triggered — locked in partial gains" if is_trail
+                    else "Stop hit — loss taken")
+
+    tag_line = f"  ·  {tag}" if tag and tag not in ("UNKNOWN",) else ""
     description = (
         f"**{outcome}**\n\n"
-        f"Entry  ${entry:,.6g}  →  Exit  ${exit_p:,.6g}\n"
-        f"P&L  **{pnl:+.2f}%**  ≈  **${dollar_pnl:+,.0f}** on this trade"
+        f"Entry `{entry:,.6g}` → Exit `{exit_p:,.6g}`\n"
+        f"P&L **{pnl:+.2f}%** ≈ **${dollar_pnl:+,.0f}**{tag_line}"
     )
+    if thesis:
+        description += f"\n*Original thesis: {thesis[:120]}*"
+
+    # v2 §8: always emit action=CLOSE so followers know to exit
+    close_action = f"action=CLOSE · signal_id={signal_id}" if signal_id else "action=CLOSE"
+
+    footer_parts = [now, close_action]
 
     _discord_post({
         "embeds": [{
-            "title":       f"{emoji} PAPER TRADE CLOSED — {sym}  (#{tid})",
+            "title":       title,
             "color":       color,
             "description": description,
-            "footer":      {"text": now},
+            "footer":      {"text": "  •  ".join(footer_parts)},
         }]
     })
 

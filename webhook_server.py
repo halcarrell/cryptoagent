@@ -61,6 +61,49 @@ except Exception as e:
 
 # ── Background scheduler ────────────────────────────────────────────────────
 
+def _compute_and_store_breadth():
+    """Sample up to 40 picks from factor_scores and compute % above 20-bar 4H MA.
+    Stores result in ai_trader module cache so decide_trade() can read it.
+    Called once per day after picks are loaded.
+    """
+    try:
+        import sqlite3, random
+        db = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        cur  = conn.cursor()
+        cur.execute("SELECT MAX(pick_date) FROM factor_scores")
+        date = cur.fetchone()[0]
+        if not date:
+            conn.close()
+            return
+        cur.execute("SELECT symbol FROM factor_scores WHERE pick_date = ?", (date,))
+        syms = [r[0] for r in cur.fetchall()]
+        conn.close()
+        if not syms:
+            return
+        sample = random.sample(syms, min(40, len(syms)))
+        since  = datetime.now(timezone.utc) - timedelta(hours=100)  # 25 × 4H bars
+        above = total = 0
+        for sym in sample:
+            try:
+                pair = sym.upper() + "USDT" if not sym.upper().endswith("USDT") else sym.upper()
+                candles = ai_trader.fetch_binance_ohlcv(pair, since, "4h")
+                if len(candles) < 20:
+                    continue
+                ma20 = sum(c["close"] for c in candles[-20:]) / 20
+                if candles[-1]["close"] > ma20:
+                    above += 1
+                total += 1
+            except Exception:
+                continue
+        if total > 0:
+            pct = above / total * 100
+            ai_trader.store_breadth(pct)
+            print(f"[breadth] {above}/{total} coins above 4H MA20 = {pct:.1f}%", flush=True)
+    except Exception as e:
+        print(f"[breadth] Compute failed: {e}", flush=True)
+
+
 def _run_daily():
     """Runs in a background thread — fetch picks, evaluate, notify Discord + email."""
     print("[scheduler] Starting daily run...", flush=True)
@@ -78,6 +121,12 @@ def _run_daily():
             notify_cron_failure("daily screener", str(e))
         except Exception:
             pass
+    # Compute breadth after picks are loaded (best-effort, non-blocking)
+    try:
+        import threading
+        threading.Thread(target=_compute_and_store_breadth, daemon=True).start()
+    except Exception:
+        pass
 
 
 def _run_live_eval():
@@ -141,6 +190,7 @@ def _run_opportunity_scan():
 
             close = conds["close"]
             atr   = conds["atr"]
+            rs    = ai_trader.compute_relative_strength(sym_pair, candles)
 
             # Long signal
             if conds["long_ok"]:
@@ -150,6 +200,7 @@ def _run_opportunity_scan():
                     "symbol": sym_pair, "exchange": "BINANCE", "side": "long",
                     "entry": close, "stop": stop, "target": target,
                     "rsi": conds["rsi"], "source": "session_scan",
+                    "relative_strength": rs,
                 }
                 alert_id = ai_trader.log_alert(alert)
                 decision = ai_trader.decide_trade(alert)
@@ -178,6 +229,7 @@ def _run_opportunity_scan():
                     "symbol": sym_pair, "exchange": "BINANCE", "side": "short",
                     "entry": close, "stop": stop, "target": target,
                     "rsi": conds["rsi"], "source": "session_scan",
+                    "relative_strength": rs,
                 }
                 alert_id = ai_trader.log_alert(alert)
                 decision = ai_trader.decide_trade(alert)

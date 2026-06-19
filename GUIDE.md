@@ -405,6 +405,28 @@ Compare your avg return against the BTC baseline in `python3 crypto_agent.py rep
 
 ---
 
+## Signal Engine v2 — Decision Hierarchy
+
+Every signal passes through four gates in order. **A failed gate = NO TRADE.**
+
+1. **REGIME** — BTC EMA50 vs EMA200 gap classifies as `RISK_ON` / `CHOP` / `RISK_OFF`
+   - `RISK_ON` (+2%): longs only
+   - `CHOP` (±2%): decorrelated longs only at half size
+   - `RISK_OFF` (−2%): shorts only
+2. **CATALYST** — news headlines scored `none / weak / strong` via news_fetcher
+3. **RELATIVE STRENGTH** — coin's 24h return vs BTC: `leader / inline / laggard`
+4. **STRUCTURE / ENTRY** — ATR-based stop/target, R:R ≥ 2.5:1 required
+
+**Conviction** (high/med/low) is derived from how many of the four factors align. High conviction signals scale toward the top of the size band.
+
+**Scale-out** — every trade has two targets:
+- **T1** (2:1 R:R): close 50% of position, stop moves to breakeven
+- **T2** (full target): trail remaining 50% with 1.5×ATR trailing stop
+
+**CLOSE signals** are posted to Discord on every exit so followers know exactly when to get out.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -413,28 +435,30 @@ Railway Web Service (always on)
 │   └── Risk monitor (pre-trade circuit breaker) — blocks trades that exceed
 │       exposure limits, hit correlation thresholds, or breach loss-streak rules
 ├── Background scheduler
-│   ├── Daily 13:00 UTC → crypto_agent.daily() → Discord + email
+│   ├── Daily 13:00 UTC → crypto_agent.daily() + breadth metric → Discord + email
 │   ├── Sunday 14:00 UTC → weight_refitter.refit() → Discord
-│   └── Every 4H @ :15 → evaluate_open_trades_live() → Discord close cards
+│   ├── Every 4H @ :15 → evaluate_open_trades_live() → tranche1 + trailing + close cards
+│   └── Every 15min 06–22 UTC → session scanner (long + short conditions)
 └── Shared SQLite volume at /data/crypto_agent.db
 
 TradingView
-└── Pine Script v6 indicator (static — never changes)
-    └── 4H bar close → webhook → Flask → risk check → decide → Discord
+└── Pine Script v6 indicator (screener_confirmation.pine)
+    └── Bar close → webhook → Flask → v2 decision hierarchy → Discord
 
-Claude.ai Scheduled Agents
-├── Daily 14:00 UTC → 5 live endpoint tests → Discord pass/fail
-└── Monday 15:00 UTC → code review + data source research → Discord report
+Signal v2 schema (emitted on every trade card):
+  signal_id, regime, regime_reason, catalyst, relative_strength,
+  conviction, thesis, invalidation, target_1_price (T1), trailing_stop
 
 Discord
-├── Daily picks summary (with paper trading stats + 7d P&L)
+├── Daily picks summary (paper trading stats + 7d P&L)
 ├── ⚡ Strong signals
-├── 🟢 Trade opened card (with news headlines)
-├── ✅/🛑 Trade closed card
-├── 🛡 Risk block alert (when circuit breaker fires)
+├── 🟢/🔴 Trade opened card (conviction/thesis/signal_id/invalidation/T1)
+├── 🎯 Partial exit — T1 hit, 50% closed, trailing rest
+├── ✅ Target hit (action=CLOSE · signal_id=...)
+├── 🛑 Stop/trailing stop hit (action=CLOSE · signal_id=...)
+├── 🛡 Risk block alert
 ├── 🔴 Cron failure alert
-├── Daily tests pass/fail
-└── 🔍 Weekly enhancement report
+└── ✅ Daily health check
 ```
 
 ### Scoring Factors (6 total)
