@@ -243,6 +243,86 @@ def notify_signal_passed(symbol: str, reason: str, side: str = "long",
     })
 
 
+def notify_signal_received(alert: dict, decision, source: str = "tradingview") -> None:
+    """Human-readable Discord card posted for EVERY signal — traded or not.
+
+    This is the card followers actually act on. It shows the full signal
+    (direction, prices, R:R) plus what the server decided and why.
+    Age label makes it clear whether the signal is still actionable.
+    """
+    sym    = alert.get("symbol", "?")
+    side   = (alert.get("side") or "long").upper()
+    entry  = alert.get("entry") or 0
+    stop   = alert.get("stop")  or 0
+    target = alert.get("target") or 0
+    rsi    = alert.get("rsi")
+    age_s  = alert.get("signal_age_secs", 0) or 0
+
+    risk   = abs(entry - stop)
+    reward = abs(target - entry)
+    rr     = reward / risk if risk else 0
+    stop_pct   = (stop   - entry) / entry * 100 if entry else 0
+    target_pct = (target - entry) / entry * 100 if entry else 0
+
+    def fmt(p): return f"${p:,.6g}"
+
+    side_emoji  = "🟢" if side == "LONG" else "🔴"
+    source_tag  = "📡 SCANNER" if source == "scanner" else "📺 TRADINGVIEW"
+
+    # Age label
+    if age_s < 120:
+        age_label = "🟢 fresh"
+        age_color_warn = ""
+    elif age_s < 900:
+        age_label = f"🟡 {age_s//60}m delayed"
+        age_color_warn = f" *(signal is {age_s//60} min old — verify price before acting)*\n"
+    elif age_s < 3600:
+        age_label = f"🟠 {age_s//60}m delayed"
+        age_color_warn = f" *(signal is {age_s//60} min old — price may have moved)*\n"
+    else:
+        age_label = f"🔴 {age_s//3600}h old"
+        age_color_warn = f" *(signal is {age_s//3600}h old — informational only)*\n"
+
+    # Server verdict line
+    action = decision.action if decision else "unknown"
+    reason = (decision.reasoning or "") if decision else ""
+    regime = (decision.regime or "") if decision else ""
+
+    if action == "enter":
+        size_pct = decision.size_pct if decision else 0
+        conv     = (decision.conviction or "").upper() if decision else ""
+        verdict  = f"✅ **PAPER TRADE OPENED** — {size_pct:.1f}% position · {conv} conviction"
+        color    = 0x2ECC71 if side == "LONG" else 0xE74C3C
+    else:
+        verdict  = f"⏸ **NOT TRADED** — {reason[:120]}"
+        color    = 0x95A5A6
+
+    regime_icon = {"RISK_ON": "📈", "RISK_OFF": "📉", "CHOP": "↔️"}.get(regime, "")
+    rsi_str = f" · RSI {rsi:.0f}" if rsi is not None else ""
+
+    url  = _binance_us_url(sym)
+    now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+    lines = [
+        age_color_warn,
+        f"Entry **{fmt(entry)}** · Stop **{fmt(stop)}** `{stop_pct:+.1f}%` · Target **{fmt(target)}** `{target_pct:+.1f}%`",
+        f"R:R **{rr:.1f}:1**{rsi_str} · {regime_icon} {regime}",
+        "",
+        verdict,
+    ]
+    if action == "enter":
+        lines.append(f"\n[🚀 Execute on Binance.US →]({url})")
+
+    _discord_post({
+        "embeds": [{
+            "title": f"{side_emoji} {side} SIGNAL — {sym}  [{source_tag} · {age_label}]",
+            "color": color,
+            "description": "\n".join(lines),
+            "footer": {"text": f"Signal at {now}"},
+        }]
+    })
+
+
 def _binance_us_url(symbol: str) -> str:
     """Build a direct Binance.US trading page link for a symbol like SOLUSDT."""
     base = symbol.upper().replace("USDT", "").replace("USD", "")

@@ -159,52 +159,82 @@ def _run_opportunity_scan():
         cur  = conn.cursor()
         today = now_utc.strftime("%Y-%m-%d")
 
-        # Today's picks, filtered to US-tradeable via watchlist (reuse TV integration if available)
+        # Top-10 picks for long + short scanning
         cur.execute("SELECT symbol, composite_score, rank FROM picks WHERE pick_date = ? ORDER BY rank", (today,))
         picks = [{"symbol": r[0], "score": r[1], "rank": r[2]} for r in cur.fetchall()]
+
+        # Short Watch — bottom-5 by composite score (most negative = weakest = best short candidates)
+        # These are the high-liquidity coins (BTC, ETH, BNB, DOGE, SHIB) the screener doesn't pick
+        # as longs because they can't outperform themselves, but they're ideal shorts in RISK_OFF.
+        cur.execute("""
+            SELECT symbol, composite_score FROM factor_scores
+            WHERE pick_date = ?
+            ORDER BY composite_score ASC
+            LIMIT 5
+        """, (today,))
+        short_watch = [{"symbol": r[0], "score": r[1], "rank": 999, "is_short_watch": True}
+                       for r in cur.fetchall()]
 
         # Coins already in open trades — skip to avoid doubling up
         cur.execute("SELECT UPPER(symbol) FROM paper_trades WHERE status='open'")
         open_syms = {r[0] for r in cur.fetchall()}
         conn.close()
 
-        if not picks:
+        if not picks and not short_watch:
             return
 
         opened = 0
-        for pick in picks:
+
+        def _scan_coin(pick, sides):
+            """Scan one coin for the given sides ('long', 'short', or both)."""
+            nonlocal opened
             sym_base = pick["symbol"].upper()
             sym_pair = sym_base + "USDT" if not sym_base.endswith("USDT") else sym_base
-
             if sym_pair in open_syms or sym_base in open_syms:
-                continue
+                return
 
-            since = now_utc - timedelta(hours=210)
+            since   = now_utc - timedelta(hours=210)
             candles = ai_trader.fetch_binance_ohlcv(sym_pair, since, "1h")
             if len(candles) < 50:
-                continue
+                return
 
             conds = ai_trader.compute_entry_conditions(candles)
-            if not conds["long_ok"] and not conds["short_ok"]:
-                continue
-
             close = conds["close"]
             atr   = conds["atr"]
             rs    = ai_trader.compute_relative_strength(sym_pair, candles)
 
-            # Long signal
-            if conds["long_ok"]:
-                stop   = round(close - atr * 1.5, 8)
-                target = round(close + atr * 3.0, 8)
+            for side in sides:
+                if side == "long" and not conds["long_ok"]:
+                    continue
+                if side == "short" and not conds["short_ok"]:
+                    continue
+                if side == "long" and conds["short_ok"]:
+                    continue  # don't long a coin showing short conditions
+
+                if side == "long":
+                    stop_p  = round(close - atr * 1.5, 8)
+                    target_p = round(close + atr * 3.0, 8)
+                else:
+                    stop_p  = round(close + atr * 1.5, 8)
+                    target_p = round(close - atr * 4.0, 8)
+
                 alert = {
-                    "symbol": sym_pair, "exchange": "BINANCE", "side": "long",
-                    "entry": close, "stop": stop, "target": target,
+                    "symbol": sym_pair, "exchange": "BINANCE", "side": side,
+                    "entry": close, "stop": stop_p, "target": target_p,
                     "rsi": conds["rsi"], "source": "session_scan",
                     "relative_strength": rs,
                 }
                 alert_id = ai_trader.log_alert(alert)
                 decision = ai_trader.decide_trade(alert)
                 ai_trader.log_decision(alert_id, decision)
+
+                # Always post a Discord signal card — whether traded or not
+                try:
+                    from notifier import notify_signal_received
+                    notify_signal_received(alert, decision, source="scanner")
+                except Exception as ne:
+                    print(f"[scanner] Signal card failed: {ne}", flush=True)
+
                 if decision.action == "enter":
                     try:
                         from risk_monitor import check_pre_trade_risk, log_rejection
@@ -212,43 +242,24 @@ def _run_opportunity_scan():
                         if approved:
                             ai_trader.open_paper_trade(decision, alert_id)
                             opened += 1
-                            print(f"[scanner] Opened LONG {sym_pair} @ {close} "
+                            print(f"[scanner] Opened {side.upper()} {sym_pair} @ {close} "
                                   f"(score={pick['score']:.2f}, rsi={conds['rsi']:.1f})", flush=True)
                         else:
                             log_rejection(alert_id, decision, risk_reason)
                     except Exception as e:
-                        print(f"[scanner] Risk check error for {sym_pair}: {e}", flush=True)
+                        print(f"[scanner] Risk check error {sym_pair}: {e}", flush=True)
                         ai_trader.open_paper_trade(decision, alert_id)
                         opened += 1
 
-            # Short signal — inverted stop/target, 4× ATR target for bear moves
-            if conds["short_ok"] and not conds["long_ok"]:
-                stop   = round(close + atr * 1.5, 8)
-                target = round(close - atr * 4.0, 8)
-                alert = {
-                    "symbol": sym_pair, "exchange": "BINANCE", "side": "short",
-                    "entry": close, "stop": stop, "target": target,
-                    "rsi": conds["rsi"], "source": "session_scan",
-                    "relative_strength": rs,
-                }
-                alert_id = ai_trader.log_alert(alert)
-                decision = ai_trader.decide_trade(alert)
-                ai_trader.log_decision(alert_id, decision)
-                if decision.action == "enter":
-                    try:
-                        from risk_monitor import check_pre_trade_risk, log_rejection
-                        approved, risk_reason = check_pre_trade_risk(decision)
-                        if approved:
-                            ai_trader.open_paper_trade(decision, alert_id)
-                            opened += 1
-                            print(f"[scanner] Opened SHORT {sym_pair} @ {close} "
-                                  f"(score={pick['score']:.2f}, rsi={conds['rsi']:.1f})", flush=True)
-                        else:
-                            log_rejection(alert_id, decision, risk_reason)
-                    except Exception as e:
-                        print(f"[scanner] Risk check error for {sym_pair}: {e}", flush=True)
-                        ai_trader.open_paper_trade(decision, alert_id)
-                        opened += 1
+        # Top-10 picks: scan for both long and short
+        for pick in picks:
+            _scan_coin(pick, ["long", "short"])
+
+        # Short Watch coins: short signals only (these are the market's weakest — BTC, ETH, BNB, etc.)
+        regime = ai_trader.btc_regime()
+        if regime in ("bear", "sideways"):  # only scan short watch in RISK_OFF/CHOP
+            for pick in short_watch:
+                _scan_coin(pick, ["short"])
 
         if opened:
             print(f"[scanner] Session scan opened {opened} trade(s).", flush=True)
@@ -402,6 +413,17 @@ def webhook():
 
     alert_id = ai_trader.log_alert(data)
 
+    # Compute signal age before deciding — used for Discord card freshness label
+    alert_age_secs = 0
+    alert_time_str = data.get("time")
+    if alert_time_str:
+        try:
+            alert_ts = datetime.fromisoformat(alert_time_str.replace("Z", "+00:00"))
+            alert_age_secs = int((datetime.now(timezone.utc) - alert_ts).total_seconds())
+        except Exception:
+            pass
+    data["signal_age_secs"] = alert_age_secs
+
     try:
         if USE_LLM and ANTHROPIC_KEY:
             decision = ai_trader.decide_trade_with_llm(data, ANTHROPIC_KEY)
@@ -424,8 +446,6 @@ def webhook():
                 risk_block = risk_reason
                 print(f"[risk] #{alert_id} {data.get('symbol')}: BLOCKED — {risk_reason}",
                       flush=True)
-                # Streak and circuit-breaker blocks repeat on every signal during an active
-                # drawdown. Deduplicate Discord alerts to once per 4 hours.
                 global _last_streak_alert_ts
                 _streak_keywords = ("consecutive losses", "circuit breaker", "cooling off")
                 is_repeat_type   = any(kw in risk_reason for kw in _streak_keywords)
@@ -447,30 +467,17 @@ def webhook():
             print(f"[risk] Monitor error (bypassing): {e}", flush=True)
             trade_id = ai_trader.open_paper_trade(decision, alert_id)
 
-    elif decision.action == "pass":
-        # Notify Discord when the server skips a signal for a notable reason so
-        # the user doesn't wonder why no trade card appeared. Cooldown prevents
-        # channel floods during sustained bear regimes or loss streaks.
-        pass_reason = decision.reasoning or ""
-        if any(kw in pass_reason for kw in _PASS_NOTIFY_KEYWORDS):
-            import time as _time
-            global _last_pass_alert_ts
-            now_ts = _time.time()
-            if now_ts - _last_pass_alert_ts > _PASS_NOTIFY_COOLDOWN:
-                try:
-                    from notifier import notify_signal_passed
-                    regime = ai_trader.btc_regime()
-                    notify_signal_passed(
-                        data.get("symbol", ""), pass_reason,
-                        side=data.get("side", "long"),
-                        regime=regime,
-                    )
-                    _last_pass_alert_ts = now_ts
-                except Exception:
-                    pass
-
     print(f"[alert {alert_id}] {data.get('symbol')}: "
           f"{decision.action.upper()} - {decision.reasoning}")
+
+    # Always post a human-readable signal card to Discord so followers can act manually.
+    # Only skip if the signal is older than 4 hours (completely useless for trading).
+    if alert_age_secs < 14400:
+        try:
+            from notifier import notify_signal_received
+            notify_signal_received(data, decision, source="tradingview")
+        except Exception as e:
+            print(f"[notifier] Signal card failed: {e}", flush=True)
 
     return jsonify({
         "alert_id": alert_id,
