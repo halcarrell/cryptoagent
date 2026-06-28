@@ -259,14 +259,18 @@ def get_screener_context(symbol_base: str, date=None):
         pass
 
     cur.execute(
-        "SELECT rank, composite_score, decorrelation_score FROM picks WHERE pick_date = ? AND symbol = ?",
+        """SELECT rank, composite_score, decorrelation_score,
+                  momentum_score, reversal_score
+           FROM picks WHERE pick_date = ? AND symbol = ?""",
         (date, symbol_base.upper())
     )
     row = cur.fetchone()
     if row:
         conn.close()
         return {"rank": row[0], "score": row[1], "date": date,
-                "decorrelation": round(row[2] or 0.0, 3)}
+                "decorrelation": round(row[2] or 0.0, 3),
+                "momentum_score": round(row[3] or 0.0, 3),
+                "reversal_score": round(row[4] or 0.0, 3)}
 
     # Not in top picks — check full universe (factor_scores) for short-watch candidates
     try:
@@ -721,6 +725,15 @@ def decide_trade(alert: dict) -> TradeDecision:
                                  0, 0.4,
                                  f"Screener score {ctx['score']:.2f} below {eff_min} threshold.")
 
+    # Skip the 2.0–2.5 score dead zone: 33% hit rate, -0.72% avg 3d return.
+    # The 2.5+ range recovers (45.5% hit, +1.87% avg 3d) so we don't cap entirely
+    # at 2.0 — we just skip this specific band for longs.
+    if side == "long" and 2.0 < ctx["score"] < 2.5:
+        return TradeDecision("pass", side, symbol, entry, stop, target,
+                             0, 0.3,
+                             f"{base} score={ctx['score']:.2f} in 2.0–2.5 dead zone "
+                             f"(33% hit rate, -0.72% avg 3d return). Skipping.")
+
     if eff_max and ctx["score"] > eff_max:
         # Overextended — flip to reversal short in bear/sideways regime.
         # Use implied ATR from the original stop to build correct short levels.
@@ -769,10 +782,19 @@ def decide_trade(alert: dict) -> TradeDecision:
                                      0, 0.2,
                                      f"RISK_OFF — {base} decorr={decorr:.2f} "
                                      f"too low (need >0.7). Coin too correlated to BTC to long.")
+            # In RISK_OFF, high-momentum coins are late-stage bounce pumps, not leaders.
+            # The refit pushed momentum weight to 53% on bull-era data. Require declining
+            # relative momentum (negative momentum_score) before longing in a bear.
+            mom_score = ctx.get("momentum_score", 0.0)
+            if mom_score > 0.5:
+                return TradeDecision("pass", side, symbol, entry, stop, target,
+                                     0, 0.2,
+                                     f"RISK_OFF — {base} momentum_score={mom_score:.2f} > 0.5. "
+                                     f"High momentum in bear regime = late-stage pump, not leader.")
             confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.25, 2)
-            reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} decorr={decorr:.2f}. "
-                          f"RISK_OFF — quarter size. R:R={rr:.2f}.")
+            reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} decorr={decorr:.2f} "
+                          f"mom={mom_score:.2f}. RISK_OFF — quarter size. R:R={rr:.2f}.")
             return _enrich("enter", side, symbol, entry, stop, target,
                            size_pct, confidence, reasoning,
                            v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
