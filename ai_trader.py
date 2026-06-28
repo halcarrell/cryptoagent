@@ -432,19 +432,21 @@ def compute_entry_conditions(candles: list) -> dict:
     green_ok = last_close > last_open
     long_ok  = trend_ok and vwap_ok and vol_ok and green_ok
 
-    # Short conditions — mirrors screener_confirmation.pine (RSI>60, vol 1.5×)
+    # Short conditions. RSI>55, vol 1.2× (relaxed from 60/1.5 — the original
+    # combination of RSI>60 + above VWAP + red bar on same 1H candle was <2%
+    # frequency even in bear markets, making the scanner nearly unreachable).
     s_trend_ok = e50 <= e200
-    s_rsi_ok   = rsi > 60
-    s_vwap_ok  = last_close > vwma * 1.01
-    s_vol_ok   = vol_ratio >= 1.5
+    s_rsi_ok   = rsi > 55
+    s_vwap_ok  = last_close > vwma * 1.005   # within 0.5% above VWAP (was 1%)
+    s_vol_ok   = vol_ratio >= 1.2             # distribution volume (was 1.5×)
     red_ok     = last_close < last_open
 
     # Failed EMA50 bounce: highest high in last 5 bars touched EMA50 zone, now closed below
-    highs5     = highs[-5:] if len(highs) >= 5 else highs
-    s_bounce_ok = max(highs5) >= e50 * 0.98 and last_close < e50
-    s_ema_reject = s_bounce_ok and vol_ratio >= 1.2 and red_ok
+    highs5      = highs[-5:] if len(highs) >= 5 else highs
+    s_bounce_ok  = max(highs5) >= e50 * 0.98 and last_close < e50
+    s_ema_reject = s_bounce_ok and vol_ratio >= 1.1 and red_ok
 
-    short_ok   = s_trend_ok and ((s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok) or s_ema_reject)
+    short_ok = s_trend_ok and ((s_rsi_ok and s_vwap_ok and s_vol_ok and red_ok) or s_ema_reject)
 
     return {
         "long_ok":   long_ok,
@@ -710,19 +712,23 @@ def decide_trade(alert: dict) -> TradeDecision:
     is_short_watch = ctx.get("is_short_watch", False)
 
     if ctx["score"] < eff_min:
-        if side == "short" and ctx["score"] < 0.5:
-            pass  # weak coin is a valid short candidate
+        # Short-watch coins (BTC, ETH, BNB, DOGE, SHIB etc.) are valid shorts
+        # regardless of score — their negative/low score IS the bearish signal.
+        if side == "short" and (ctx["score"] < 0.5 or is_short_watch):
+            pass  # allow — weak coin / short-watch is a good short candidate
         else:
             return TradeDecision("pass", side, symbol, entry, stop, target,
                                  0, 0.4,
                                  f"Screener score {ctx['score']:.2f} below {eff_min} threshold.")
 
     if eff_max and ctx["score"] > eff_max:
-        # Overextended — flip to reversal short in bear regime
+        # Overextended — flip to reversal short in bear/sideways regime.
+        # Use implied ATR from the original stop to build correct short levels.
         if side == "long" and regime in ("bear", "sideways"):
-            atr_d = abs(entry - stop)
-            s_stop, s_target = entry + atr_d, entry - atr_d
-            s_rr = atr_d / atr_d if atr_d > 0 else 0
+            atr_implied = abs(entry - stop) / 1.5   # original stop = 1.5 × ATR
+            s_stop   = round(entry + atr_implied * 1.5, 8)   # stop above entry
+            s_target = round(entry - atr_implied * 4.0, 8)   # wider target (4×)
+            s_rr     = 4.0 / 1.5                              # 2.67:1
             if s_rr >= MIN_RISK_REWARD:
                 confidence = min(1.0, (ctx["score"] - eff_max) / 0.5)
                 size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
@@ -1077,7 +1083,7 @@ def evaluate_open_trades_live():
             t1_hit = (side == "long" and last_price >= t1_p) or \
                      (side == "short" and last_price <= t1_p)
             if t1_hit:
-                t1_pnl = (t1_p / entry - 1) * 100 if side == "long" else (entry / t1_p - 1) * 100
+                t1_pnl = (t1_p / entry - 1) * 100 if side == "long" else (entry - t1_p) / entry * 100
                 # Move trailing stop to breakeven
                 cur.execute("""
                     UPDATE paper_trades
@@ -1116,7 +1122,7 @@ def evaluate_open_trades_live():
 
         if status:
             time_in_h = (now - opened_at).total_seconds() / 3600.0
-            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
+            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry - exit_p) / entry * 100
             surprise, tag = _surprise_ratio(
                 pnl, entry, orig_stop, tgt_p, t.get("confidence", 0.5), side
             )
@@ -1262,7 +1268,7 @@ def evaluate_open_trades():
                 except (TypeError, ValueError):
                     closed_at = now
             time_in_trade_h = (closed_at - opened_at).total_seconds() / 3600.0
-            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
+            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry - exit_p) / entry * 100
             surprise, tag = _surprise_ratio(
                 pnl, entry, t["stop_price"], t["target_price"], t.get("confidence", 0.5), t["side"]
             )

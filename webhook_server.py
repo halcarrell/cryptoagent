@@ -349,9 +349,12 @@ def start_scheduler():
     scheduler.add_job(_run_refit, "cron", day_of_week="sun", hour=14, minute=5, id="refit")
     # Live trade evaluation: every 4h at :15 past each 4H bar close (0,4,8,12,16,20 UTC)
     scheduler.add_job(_run_live_eval, "cron", hour="0,4,8,12,16,20", minute=15, id="live_eval")
-    # Opportunity scanner: every 15 min during active trading hours (06-22 UTC)
+    # Opportunity scanner: every 15 min during active trading hours (06-22 UTC).
+    # Offset 2 min from :00 so scanner never collides with TradingView 4H bar-close alerts
+    # (which fire at exactly :00). The 2-min gap lets TradingView's POST arrive and clear
+    # the Flask thread before the scanner's Binance OHLCV calls compete for it.
     scheduler.add_job(_run_opportunity_scan, "cron",
-                      hour="6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22", minute="0,15,30,45", id="opp_scan")
+                      hour="6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22", minute="2,17,32,47", id="opp_scan")
     scheduler.start()
     print("[scheduler] Started — daily@13:00 UTC, session-scan@every 15min 06-23 UTC, "
           "self-test@14:00 UTC, live-eval@every 4h, refit@Sunday 14:05 UTC", flush=True)
@@ -741,11 +744,15 @@ def _mask_secret(s: str) -> str:
     return f"configured (****{s[-4:]})" if len(s) >= 4 else "configured (short)"
 
 
+# Start scheduler at module load — works for both `python webhook_server.py`
+# (dev) and `gunicorn webhook_server:app` (production). Gunicorn never reaches
+# the __main__ block, so this is the only reliable startup hook.
+port = int(os.environ.get("PORT", 8080))
+print(f"Webhook server starting on :{port}")
+print(f"Auth token: {_mask_secret(AUTH_TOKEN)}")
+print(f"Anthropic key: {'configured' if ANTHROPIC_KEY else 'not set'}")
+print(f"Decider: {'Claude LLM' if USE_LLM and ANTHROPIC_KEY else 'rules-based'}")
+start_scheduler()
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    print(f"Webhook server starting on :{port}")
-    print(f"Auth token: {_mask_secret(AUTH_TOKEN)}")
-    print(f"Anthropic key: {'configured' if ANTHROPIC_KEY else 'not set'}")
-    print(f"Decider: {'Claude LLM' if USE_LLM and ANTHROPIC_KEY else 'rules-based'}")
-    start_scheduler()
     app.run(host="0.0.0.0", port=port, debug=False)

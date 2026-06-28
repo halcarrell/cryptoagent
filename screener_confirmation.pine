@@ -172,7 +172,7 @@ if long_entry
               ',"stop":'      + str.tostring(long_stop)                                     +
               ',"target":'    + str.tostring(long_target)                                   +
               ',"rsi":'       + str.tostring(math.round(rsi_v, 2))                         +
-              ',"time":"'     + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
+              ',"time":"'     + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
     alert(header + "\n" + payload, alert.freq_once_per_bar_close)
 
 if short_entry
@@ -192,7 +192,7 @@ if short_entry
               ',"stop":'      + str.tostring(short_stop)                                    +
               ',"target":'    + str.tostring(short_target)                                  +
               ',"rsi":'       + str.tostring(math.round(rsi_v, 2))                         +
-              ',"time":"'     + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
+              ',"time":"'     + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") + '"}'
     alert(header + "\n" + payload, alert.freq_once_per_bar_close)
 
 alertcondition(long_entry,  title="Long entry confirmed",  message="Long signal on {{ticker}}")
