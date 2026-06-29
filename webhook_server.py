@@ -552,6 +552,39 @@ def relay_notify():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/admin/config", methods=["POST"])
+def admin_set_config():
+    """Update DB config_overrides directly (min_score, max_score).
+    POST {"auth":"...","min_score":2.5} — invalidates the 1-hour cache immediately.
+    """
+    data = request.json or {}
+    if data.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        db   = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_overrides
+            (key TEXT PRIMARY KEY, value TEXT)
+        """)
+        updates = {}
+        for key in ("min_score", "max_score"):
+            if key in data:
+                conn.execute(
+                    "INSERT OR REPLACE INTO config_overrides (key, value) VALUES (?, ?)",
+                    (key, str(data[key]))
+                )
+                updates[key] = data[key]
+        conn.commit()
+        conn.close()
+        # Bust the in-process 1-hour cache so next decision picks it up immediately
+        import ai_trader as _at
+        _at._config_override_cache = (0.0, {})
+        return jsonify({"status": "ok", "updated": updates})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/status", methods=["GET"])
 def system_status():
     """System health: picks freshness, open trades, recent alert activity."""

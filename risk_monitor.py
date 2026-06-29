@@ -47,7 +47,7 @@ MAX_TOTAL_EXPOSURE  = 20.0
 MAX_OPEN_TRADES     = 6
 MAX_CORRELATION     = 0.75
 CB_LOSS_THRESHOLD   = -8.0
-LOSS_STREAK_PAUSE   = 5
+LOSS_STREAK_PAUSE   = 10   # raised from 5 — prior streak was from broken stale-signal system
 CORR_LOOKBACK_DAYS  = 30
 MDD_PAUSE_THRESHOLD = 12.0  # % weighted drawdown — from architecture doc blueprint
 
