@@ -357,13 +357,14 @@ def auto_tune_config():
                 ELSE '3.0+'
             END AS bucket,
             COUNT(*),
-            AVG(realized_3d)
+            AVG(realized_3d),
+            100.0 * SUM(CASE WHEN realized_3d > 0 THEN 1.0 ELSE 0 END) / MAX(COUNT(realized_3d), 1)
         FROM picks
         WHERE realized_3d IS NOT NULL
         GROUP BY bucket
         ORDER BY MIN(composite_score)
     """)
-    buckets = [{"bucket": r[0], "n": r[1], "avg_3d": r[2]} for r in cur.fetchall()]
+    buckets = [{"bucket": r[0], "n": r[1], "avg_3d": r[2], "hit_rate": r[3]} for r in cur.fetchall()]
     total_n = sum(b["n"] for b in buckets)
 
     if total_n < 20:
@@ -383,13 +384,26 @@ def auto_tune_config():
     eff_min = db_vals.get("min_score", cfg_risk.get("min_score", 1.2))
     eff_max = db_vals.get("max_score", cfg_risk.get("max_score", 2.5))
 
-    # Recommended min: first bucket (ascending) with avg_3d > 0 and n >= 10
+    # Recommended min: walk DOWN from the top bucket, extending the "good" range
+    # while buckets stay profitable (avg_3d > 0, hit_rate >= 40%, n >= 10). Stops
+    # at the first dead zone — this prevents picking an isolated positive-avg
+    # bucket with a poor hit rate that happens to sit below a dead zone (e.g.
+    # 1.5-2.0 at +5.3% avg but only 35% hit rate, sandwiched by losing buckets
+    # on both sides). Picking the first ascending positive bucket (old logic)
+    # would reopen the exact dead zone the bucket data warns against.
+    def _is_good(b):
+        return bool(b) and b["n"] >= 10 and (b.get("avg_3d") or 0) > 0 and (b.get("hit_rate") or 0) >= 40
+
     new_min = eff_min
-    for bk in ORDER:
+    contiguous_good = []
+    for bk in reversed(ORDER):
         b = bmap.get(bk)
-        if b and b["n"] >= 10 and (b.get("avg_3d") or 0) > 0:
-            new_min = BOUNDS[bk]
+        if _is_good(b):
+            contiguous_good.append(bk)
+        else:
             break
+    if contiguous_good:
+        new_min = BOUNDS[contiguous_good[-1]]
 
     # Recommended max: walk from top down; cap at first bucket with negative avg_3d
     new_max = eff_max

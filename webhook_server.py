@@ -52,6 +52,12 @@ _PASS_NOTIFY_KEYWORDS = (
     "above", "cap", "overextended", "bearish regime",
 )
 
+# Per-symbol+side cooldown for scanner Discord signal cards. The scanner runs
+# every 15 min and the same coin can show qualifying conditions for hours —
+# without this, a single persistent setup floods Discord with a card every cycle.
+_SCANNER_NOTIFY_COOLDOWN = 4 * 3600  # 4 hours
+_scanner_last_notified: dict = {}    # {"SYMBOL-side": epoch_ts}
+
 try:
     ai_trader.init_trading_tables().close()
     print("DB init OK", flush=True)
@@ -174,6 +180,8 @@ def _run_opportunity_scan():
         """, (today,))
         short_watch = [{"symbol": r[0], "score": r[1], "rank": 999, "is_short_watch": True}
                        for r in cur.fetchall()]
+        print(f"[scanner] picks={len(picks)} short_watch={len(short_watch)} "
+              f"({today})", flush=True)
 
         # Coins already in open trades — skip to avoid doubling up
         cur.execute("SELECT UPPER(symbol) FROM paper_trades WHERE status='open'")
@@ -212,11 +220,11 @@ def _run_opportunity_scan():
                     continue  # don't long a coin showing short conditions
 
                 if side == "long":
-                    stop_p  = round(close - atr * 1.5, 8)
-                    target_p = round(close + atr * 3.0, 8)
+                    stop_p   = round(close - atr * 1.5, 8)
+                    target_p = round(close + atr * 3.75, 8)  # 3.75/1.5 = 2.5:1 R:R (min threshold)
                 else:
-                    stop_p  = round(close + atr * 1.5, 8)
-                    target_p = round(close - atr * 4.0, 8)
+                    stop_p   = round(close + atr * 1.5, 8)
+                    target_p = round(close - atr * 4.0, 8)   # 4.0/1.5 = 2.67:1 R:R
 
                 alert = {
                     "symbol": sym_pair, "exchange": "BINANCE", "side": side,
@@ -228,12 +236,23 @@ def _run_opportunity_scan():
                 decision = ai_trader.decide_trade(alert)
                 ai_trader.log_decision(alert_id, decision)
 
-                # Always post a Discord signal card — whether traded or not
-                try:
-                    from notifier import notify_signal_received
-                    notify_signal_received(alert, decision, source="scanner")
-                except Exception as ne:
-                    print(f"[scanner] Signal card failed: {ne}", flush=True)
+                # Post a Discord signal card — but only once per symbol+side per
+                # cooldown window. A persistent setup (e.g. coin stuck overbought
+                # for hours) would otherwise re-fire a card every 15-min scan.
+                # Trades that actually open always notify regardless of cooldown.
+                import time as _time
+                notify_key = f"{sym_pair}-{side}"
+                now_ts = _time.time()
+                last_ts = _scanner_last_notified.get(notify_key, 0)
+                should_notify = (decision.action == "enter"
+                                 or now_ts - last_ts > _SCANNER_NOTIFY_COOLDOWN)
+                if should_notify:
+                    try:
+                        from notifier import notify_signal_received
+                        notify_signal_received(alert, decision, source="scanner")
+                        _scanner_last_notified[notify_key] = now_ts
+                    except Exception as ne:
+                        print(f"[scanner] Signal card failed: {ne}", flush=True)
 
                 if decision.action == "enter":
                     try:
@@ -474,8 +493,10 @@ def webhook():
           f"{decision.action.upper()} - {decision.reasoning}")
 
     # Always post a human-readable signal card to Discord so followers can act manually.
-    # Only skip if the signal is older than 4 hours (completely useless for trading).
-    if alert_age_secs < 14400:
+    # Pine Script now uses time_close (bar-close timestamp) so fresh signals arrive
+    # <10s old. Anything beyond 15 min is a TradingView retry of an already-rejected
+    # signal — posting a card for those just confuses followers with dead prices.
+    if alert_age_secs < 900:
         try:
             from notifier import notify_signal_received
             notify_signal_received(data, decision, source="tradingview")
@@ -706,14 +727,22 @@ def score_analysis():
             else:
                 break  # stop at first non-negative from the top
 
-        # 3. Find minimum score where avg_3d is meaningfully positive (>1%)
-        #    — use bucket lower bound, not actual bucket_min.
+        # 3. Find minimum score: walk DOWN from the top bucket, extending the
+        #    "good" range while avg_3d > 1% AND hit_rate >= 40% AND n >= 5.
+        #    Stops at the first dead zone. Picking the first ascending bucket
+        #    with positive avg_3d (old logic) could recommend a min_score that
+        #    reopens a dead zone flagged in step 1 above — contiguous-from-top
+        #    avoids that contradiction.
         suggested_min = current_min
-        for bk in _BUCKET_ORDER:
+        _contig = []
+        for bk in reversed(_BUCKET_ORDER):
             b = bucket_map.get(bk)
-            if b and b["n"] >= 5 and (b.get("avg_3d") or 0) > 1.0:
-                suggested_min = _BUCKET_LOWER[bk]
+            if b and b["n"] >= 5 and (b.get("avg_3d") or 0) > 1.0 and (b.get("hit_rate_3d") or 0) >= 40:
+                _contig.append(bk)
+            else:
                 break
+        if _contig:
+            suggested_min = _BUCKET_LOWER[_contig[-1]]
 
         # Build summary message
         changes = []
