@@ -35,9 +35,10 @@ use_s_vol    = input.bool(true,  "Volume spike (1.5× avg — distribution)", gr
 
 // ===== Risk Settings =====
 g_risk = "Risk"
-atr_stop_mult         = input.float(1.5, "ATR stop multiplier",         group=g_risk)
-atr_target_mult       = input.float(3.0, "ATR long target multiplier",  group=g_risk)
-atr_short_target_mult = input.float(4.0, "ATR short target multiplier", group=g_risk,
+atr_stop_mult         = input.float(1.5,  "ATR stop multiplier",         group=g_risk)
+atr_target_mult       = input.float(3.75, "ATR long target multiplier",  group=g_risk,
+     tooltip="3.75× ATR target / 1.5× ATR stop = 2.5:1 R:R, matching server minimum.")
+atr_short_target_mult = input.float(4.0,  "ATR short target multiplier", group=g_risk,
      tooltip="Wider target on shorts to capture full bear-market moves. 4.0× ATR gives ~2.67:1 R:R.")
 
 // ===== Session Gate =====

@@ -146,10 +146,28 @@ def get_portfolio_state() -> dict:
     """, (cutoff,))
     rolling_7d = cur.fetchone()[0] or 0.0
 
-    cur.execute("""
-        SELECT pnl_pct FROM paper_trades
-        WHERE status != 'open' ORDER BY closed_at DESC LIMIT 10
-    """)
+    # Check for a manual streak reset — stored in config_overrides by /admin/reset-streak.
+    # Trades closed before streak_reset_after are excluded so the counter starts fresh.
+    streak_cutoff = None
+    try:
+        cur.execute("SELECT value FROM config_overrides WHERE key='streak_reset_after'")
+        row = cur.fetchone()
+        if row:
+            streak_cutoff = row[0]
+    except Exception:
+        pass
+
+    if streak_cutoff:
+        cur.execute("""
+            SELECT pnl_pct FROM paper_trades
+            WHERE status != 'open' AND closed_at > ?
+            ORDER BY closed_at DESC LIMIT 10
+        """, (streak_cutoff,))
+    else:
+        cur.execute("""
+            SELECT pnl_pct FROM paper_trades
+            WHERE status != 'open' ORDER BY closed_at DESC LIMIT 10
+        """)
     recent = [r[0] for r in cur.fetchall()]
     streak = 0
     for pnl in recent:

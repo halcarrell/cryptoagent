@@ -606,6 +606,52 @@ def admin_set_config():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/admin/reset-streak", methods=["POST"])
+def admin_reset_streak():
+    """Reset the consecutive-loss circuit breaker.
+
+    Writes streak_reset_after = now() to config_overrides so the risk monitor
+    only counts trades closed after this point toward the streak. The historical
+    losing trades are preserved in full for analysis — they're just excluded from
+    the live streak counter.
+
+    POST {"auth": "TOKEN"}
+    """
+    data = request.json or {}
+    if data.get("auth") != AUTH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        db   = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_overrides
+            (key TEXT PRIMARY KEY, value TEXT)
+        """)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO config_overrides (key, value) VALUES (?, ?)",
+            ("streak_reset_after", now_iso)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[admin] Loss-streak reset. Trades before {now_iso} excluded from counter.",
+              flush=True)
+        try:
+            from notifier import _discord_post
+            _discord_post({"embeds": [{
+                "title": "🔄 Loss streak reset",
+                "color": 0x3498DB,
+                "description": (f"Consecutive-loss circuit breaker manually reset.\n"
+                                f"Streak counter restarted from {now_iso[:16]} UTC.\n"
+                                f"Historical trades preserved — excluded from live count only."),
+            }]})
+        except Exception:
+            pass
+        return jsonify({"status": "ok", "streak_reset_after": now_iso})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/status", methods=["GET"])
 def system_status():
     """System health: picks freshness, open trades, recent alert activity."""
