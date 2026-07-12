@@ -509,9 +509,9 @@ def btc_regime() -> str:
               f"gap={gap_pct:+.1f}% → {result.upper()}", flush=True)
         return result
     except Exception:
-        import time as _time2
-        _btc_regime_cache = (_time2.monotonic(), "bull", 0.0, 0.0, 0.0, 0.0)
-        return "bull"
+        # Don't update cache timestamp on failure — next call retries immediately
+        # instead of treating a stale "bull" as fresh for another 4 hours.
+        return _btc_regime_cache[1] or "bull"
 
 
 def btc_regime_detail() -> tuple:
@@ -695,6 +695,15 @@ def decide_trade(alert: dict) -> TradeDecision:
     regime    = btc_regime()                    # 'bull' | 'sideways' | 'bear'
     v2_regime, v2_reason = btc_regime_detail()  # RISK_ON | CHOP | RISK_OFF + reason
 
+    # STEP 1b — BREADTH FILTER
+    # breadth = % of sampled coins above 4H MA20 (computed each daily run, default 50%).
+    # Narrow breadth (<30%) while going long = most coins are already below their trend.
+    # Wide breadth (>70%) while going short = most coins are rising, shorting is contrarian.
+    breadth = get_breadth()
+    breadth_note = f" | breadth={breadth:.0f}%"
+    breadth_long_penalty  = max(0.6, breadth / 50.0) if breadth < 50 else 1.0
+    breadth_short_penalty = max(0.6, (100 - breadth) / 50.0) if breadth > 50 else 1.0
+
     # STEP 2 — CATALYST (best-effort via news_fetcher)
     base = strip_quote(symbol)
     cat_str, cat_note = _score_catalyst(base)
@@ -769,9 +778,10 @@ def decide_trade(alert: dict) -> TradeDecision:
                                      f"CHOP regime — {base} decorr={decorr:.2f} "
                                      f"too low (need >0.5). Only trade decorrelated coins in chop.")
             confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
+            confidence = round(confidence * breadth_long_penalty, 3)
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
             reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} decorr={decorr:.2f}. "
-                          f"CHOP — half size. R:R={rr:.2f}.")
+                          f"CHOP — half size. R:R={rr:.2f}.{breadth_note}")
             return _enrich("enter", side, symbol, entry, stop, target,
                            size_pct, confidence, reasoning,
                            v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
@@ -792,24 +802,27 @@ def decide_trade(alert: dict) -> TradeDecision:
                                      f"RISK_OFF — {base} momentum_score={mom_score:.2f} > 0.5. "
                                      f"High momentum in bear regime = late-stage pump, not leader.")
             confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
+            confidence = round(confidence * breadth_long_penalty, 3)
             size_pct   = round(MAX_POSITION_PCT * confidence * 0.25, 2)
             reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} decorr={decorr:.2f} "
-                          f"mom={mom_score:.2f}. RISK_OFF — quarter size. R:R={rr:.2f}.")
+                          f"mom={mom_score:.2f}. RISK_OFF — quarter size. R:R={rr:.2f}.{breadth_note}")
             return _enrich("enter", side, symbol, entry, stop, target,
                            size_pct, confidence, reasoning,
                            v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
 
     # Full-size: bull-regime longs + all shorts that cleared the regime gate
     if is_short_watch and side == "short":
-        confidence = 0.5
+        confidence = round(0.5 * breadth_short_penalty, 3)
         size_pct   = round(MAX_POSITION_PCT * confidence * 0.5, 2)
         reasoning  = (f"{base} short-watch score={ctx['score']:.2f} regime={regime}. "
-                      f"Weak coin — half size. R:R={rr:.2f}.")
+                      f"Weak coin — half size. R:R={rr:.2f}.{breadth_note}")
     else:
+        penalty    = breadth_long_penalty if side == "long" else breadth_short_penalty
         confidence = min(1.0, 0.3 + 0.7 * (ctx["score"] - eff_min) / max((eff_max or 3.0) - eff_min, 0.5))
+        confidence = round(confidence * penalty, 3)
         size_pct   = round(MAX_POSITION_PCT * confidence, 2)
         reasoning  = (f"{base} #{ctx['rank']} score={ctx['score']:.2f} regime={regime}. "
-                      f"R:R={rr:.2f}. Size={size_pct}% conf={confidence:.2f}.")
+                      f"R:R={rr:.2f}. Size={size_pct}% conf={confidence:.2f}.{breadth_note}")
 
     return _enrich("enter", side, symbol, entry, stop, target,
                    size_pct, confidence, reasoning,
@@ -1062,10 +1075,12 @@ def evaluate_open_trades_live():
             opened_at = datetime.fromisoformat(t["opened_at"])
             if opened_at.tzinfo is None:
                 opened_at = opened_at.replace(tzinfo=timezone.utc)
-            if (now - opened_at).total_seconds() < max(MIN_HOLD_HOURS * 3600, 1800):
-                continue
         except (TypeError, ValueError):
             continue
+
+        # Guard full exits only — tranche1 partial close and trailing stop updates
+        # run regardless of hold time so fast movers get their T1 card and breakeven stop.
+        too_young = (now - opened_at).total_seconds() < max(MIN_HOLD_HOURS * 3600, 1800)
 
         last_price = fetch_live_price(t["symbol"])
         if last_price is None:
@@ -1142,7 +1157,7 @@ def evaluate_open_trades_live():
             elif last_price <= tgt_p:
                 status, exit_p = "target", tgt_p
 
-        if status:
+        if status and not too_young:
             time_in_h = (now - opened_at).total_seconds() / 3600.0
             pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry - exit_p) / entry * 100
             surprise, tag = _surprise_ratio(

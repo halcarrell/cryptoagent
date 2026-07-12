@@ -778,11 +778,12 @@ def cmd_daily(conn):
     watchlist_symbols = []
     try:
         from tv_integration import export_watchlist, get_pine_score_string
-        export_watchlist(date=today, exchange="BINANCE", filter_exchange="US_EXCHANGES")
-        # Collect the TV symbols for the Discord message
+        export_watchlist(date=today, exchange="BINANCE", filter_exchange="BINANCE_US")
+        # Collect the TV symbols for the Discord message (Binance.US only — Coinbase-only
+        # coins are excluded because they get BINANCE: prefix which TradingView can't resolve)
         from tv_integration import latest_picks, coingecko_to_tv_symbol, get_tradeable_pairs, SYMBOL_OVERRIDES, EXCHANGE_QUOTE
         _, rows = latest_picks(today)
-        tradeable = get_tradeable_pairs("US_EXCHANGES", "USDT")
+        tradeable = get_tradeable_pairs("BINANCE_US", "USDT")
         for coin_id, sym, score, price in rows:
             base = SYMBOL_OVERRIDES.get(coin_id, sym).upper()
             if not tradeable or base in tradeable:

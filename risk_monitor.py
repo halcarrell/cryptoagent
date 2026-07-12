@@ -334,7 +334,7 @@ def evaluate_shadow_trades_live():
             elif last_price <= t["target_price"]:
                 status, exit_p = "target", t["target_price"]
         if status:
-            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry / exit_p - 1) * 100
+            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry - exit_p) / entry * 100
             cur.execute("""
                 UPDATE shadow_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=?
                 WHERE shadow_id=?
