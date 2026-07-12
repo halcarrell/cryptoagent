@@ -220,6 +220,11 @@ def init_trading_tables():
     # Idempotent migrations for older DBs that pre-date the new columns.
     _add_missing_columns(conn, "alerts", _ALERT_COLUMNS)
     _add_missing_columns(conn, "paper_trades", _TRADE_COLUMNS)
+    # Partial unique index: de-duplicates signals at DB level (NULL values excluded).
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_signal_id
+        ON paper_trades(signal_id) WHERE signal_id IS NOT NULL
+    """)
     conn.commit()
     return conn
 
@@ -246,15 +251,15 @@ def get_screener_context(symbol_base: str, date=None):
         conn.close()
         return None
 
-    # Staleness check
-    from datetime import date as _date
-    today = datetime.now(timezone.utc).date()
+    # Staleness check — use actual elapsed hours, not calendar-day × 24.
+    # Screener runs at 13:00 UTC so we anchor age to that time on pick_date.
     try:
-        pick_dt = datetime.strptime(date, "%Y-%m-%d").date()
-        age_hours = (today - pick_dt).days * 24
+        pick_dt = datetime.strptime(date, "%Y-%m-%d")
+        pick_run_utc = pick_dt.replace(hour=13, minute=0, second=0, tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - pick_run_utc).total_seconds() / 3600.0
         if age_hours > PICKS_MAX_AGE_HOURS:
             conn.close()
-            return {"stale": True, "date": date, "age_hours": age_hours}
+            return {"stale": True, "date": date, "age_hours": round(age_hours, 1)}
     except Exception:
         pass
 
@@ -522,9 +527,10 @@ def btc_regime_detail() -> tuple:
     btc_regime()  # ensure cache is warm
     _, regime_str, gap_pct, e50, e200, price = _btc_regime_cache
     v2 = _V2_REGIME.get(regime_str, "CHOP")
+    price_str = f"price ${price:,.0f}; " if price > 0 else ""
     reason = (
         f"BTC EMA50/200 gap {gap_pct:+.1f}% → {v2}; "
-        f"price ${price:,.0f}; "
+        f"{price_str}"
         f"{'EMA50 above' if e50 > e200 else 'EMA50 below'} EMA200"
     )
     return v2, reason
@@ -1163,13 +1169,19 @@ def evaluate_open_trades_live():
             surprise, tag = _surprise_ratio(
                 pnl, entry, orig_stop, tgt_p, t.get("confidence", 0.5), side
             )
+            # Best-effort MFE/MAE for live-priced closes (we have exit price, not path).
+            # Fills NULL only — snapshot evaluator values are kept if already set.
+            mfe_est = tgt_p if status == "target" else (
+                t.get("target_1_price") or exit_p if t1_closed else exit_p)
+            mae_est = exit_p if status == "stopped" else entry
             cur.execute("""
                 UPDATE paper_trades
                 SET status=?, closed_at=?, exit_price=?, pnl_pct=?,
-                    time_in_trade_hours=?, surprise_ratio=?, outcome_tag=?
+                    time_in_trade_hours=?, surprise_ratio=?, outcome_tag=?,
+                    mfe_price=COALESCE(mfe_price, ?), mae_price=COALESCE(mae_price, ?)
                 WHERE trade_id=?
             """, (status, now.isoformat(), exit_p, pnl,
-                  time_in_h, surprise, tag, t["trade_id"]))
+                  time_in_h, surprise, tag, mfe_est, mae_est, t["trade_id"]))
             closed += 1
             label = "trailing stop" if (t1_closed and status == "stopped") else status
             print(f"[live-eval] #{t['trade_id']} {t['symbol']} {label.upper()} "
@@ -1215,7 +1227,8 @@ def evaluate_open_trades():
         base   = strip_quote(t["symbol"])
         side   = t["side"]
         entry  = t["entry_price"]
-        stop_p = t["stop_price"]
+        # Use trailing_stop if set (moved to breakeven after T1); fall back to original stop.
+        stop_p = t.get("trailing_stop") or t["stop_price"]
         tgt_p  = t["target_price"]
 
         opened_at_iso = t["opened_at"]

@@ -41,22 +41,18 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
 _RISK_STREAK_ALERT_COOLDOWN = 4 * 3600  # 4 hours
 _last_streak_alert_ts: float = 0.0
 
-# Cooldown for "signal received but not traded" pass notifications.
-# Regime and score-cap blocks repeat on every TV signal while the condition holds —
-# we notify once per 4 hours so the user knows why they're not getting trade cards.
-_PASS_NOTIFY_COOLDOWN = 4 * 3600
-_last_pass_alert_ts:  float = 0.0
-# Reasons worth notifying about (user fired a signal but server declined to trade)
-_PASS_NOTIFY_KEYWORDS = (
-    "bearish market regime", "EMA50 < EMA200",
-    "above", "cap", "overextended", "bearish regime",
-)
-
 # Per-symbol+side cooldown for scanner Discord signal cards. The scanner runs
 # every 15 min and the same coin can show qualifying conditions for hours —
 # without this, a single persistent setup floods Discord with a card every cycle.
 _SCANNER_NOTIFY_COOLDOWN = 4 * 3600  # 4 hours
 _scanner_last_notified: dict = {}    # {"SYMBOL-side": epoch_ts}
+
+# On restart the cooldown dict is empty, so the first scan cycle would send a
+# card for every qualifying condition. Suppress scanner notifications for the
+# first 30 minutes after startup to prevent post-deploy Discord floods.
+import time as _time_module
+_service_start_ts: float = _time_module.time()
+_STARTUP_SCANNER_GRACE = 30 * 60  # seconds
 
 try:
     ai_trader.init_trading_tables().close()
@@ -244,8 +240,9 @@ def _run_opportunity_scan():
                 notify_key = f"{sym_pair}-{side}"
                 now_ts = _time.time()
                 last_ts = _scanner_last_notified.get(notify_key, 0)
+                in_startup = now_ts - _service_start_ts < _STARTUP_SCANNER_GRACE
                 should_notify = (decision.action == "enter"
-                                 or now_ts - last_ts > _SCANNER_NOTIFY_COOLDOWN)
+                                 or (not in_startup and now_ts - last_ts > _SCANNER_NOTIFY_COOLDOWN))
                 if should_notify:
                     try:
                         from notifier import notify_signal_received

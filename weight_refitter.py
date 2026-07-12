@@ -382,7 +382,7 @@ def auto_tune_config():
     cfg_path = Path(__file__).parent / "config.json"
     cfg_risk = json.loads(cfg_path.read_text()).get("risk", {}) if cfg_path.exists() else {}
     eff_min = db_vals.get("min_score", cfg_risk.get("min_score", 1.2))
-    eff_max = db_vals.get("max_score", cfg_risk.get("max_score", 2.5))
+    eff_max = db_vals.get("max_score", cfg_risk.get("max_score", None))
 
     # Recommended min: walk DOWN from the top bucket, extending the "good" range
     # while buckets stay profitable (avg_3d > 0, hit_rate >= 40%, n >= 10). Stops
