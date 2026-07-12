@@ -171,7 +171,7 @@ def get_portfolio_state() -> dict:
     recent = [r[0] for r in cur.fetchall()]
     streak = 0
     for pnl in recent:
-        if pnl is not None and pnl < 0:
+        if pnl is None or pnl < 0:
             streak += 1
         else:
             break

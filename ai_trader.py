@@ -613,7 +613,7 @@ def _score_catalyst(symbol: str) -> tuple:
 
 def _enrich(action, side, symbol, entry, stop, target, size_pct, confidence,
             reasoning, v2_regime, v2_reason, ctx, rr,
-            rs="inline", cat_str="none", cat_note="") -> TradeDecision:
+            rs="inline", cat_str="none", cat_note="", alert_ts=None) -> TradeDecision:
     """Attach all v2 Signal Engine fields to an 'enter' decision."""
     base = strip_quote(symbol)
     risk = abs(entry - stop) if (entry and stop) else 0
@@ -638,7 +638,7 @@ def _enrich(action, side, symbol, entry, stop, target, size_pct, confidence,
 
     return TradeDecision(
         action, side, symbol, entry, stop, target, size_pct, confidence, reasoning,
-        signal_id=generate_signal_id(symbol),
+        signal_id=generate_signal_id(symbol, ts=alert_ts),
         regime=v2_regime, regime_reason=v2_reason,
         catalyst_strength=cat_str, catalyst_note=cat_note,
         relative_strength=rs, conviction=conviction,
@@ -661,10 +661,12 @@ def decide_trade(alert: dict) -> TradeDecision:
                              0, 0, "Missing entry/stop/target.")
 
     # Signal latency check — stale signals accumulate during server restarts
+    bar_ts = None
     alert_time_str = alert.get("time")
     if alert_time_str and alert.get("source") != "session_scan":
         try:
             alert_ts = datetime.fromisoformat(alert_time_str.replace("Z", "+00:00"))
+            bar_ts = alert_ts
             lag = (datetime.now(timezone.utc) - alert_ts).total_seconds()
             if lag > MAX_SIGNAL_AGE_SECS:
                 return TradeDecision("pass", side, symbol, entry, stop, target,
@@ -764,7 +766,8 @@ def decide_trade(alert: dict) -> TradeDecision:
                                f"in {regime} — reversal short. R:R={s_rr:.1f}:1.")
                 return _enrich("enter", "short", symbol, entry, s_stop, s_target,
                                size_pct, confidence, reasoning,
-                               v2_regime, v2_reason, ctx, s_rr, rs, cat_str, cat_note)
+                               v2_regime, v2_reason, ctx, s_rr, rs, cat_str, cat_note,
+                               alert_ts=bar_ts)
         return TradeDecision("pass", side, symbol, entry, stop, target,
                              0, 0.3,
                              f"Screener score {ctx['score']:.2f} above {eff_max} cap.")
@@ -790,7 +793,8 @@ def decide_trade(alert: dict) -> TradeDecision:
                           f"CHOP — half size. R:R={rr:.2f}.{breadth_note}")
             return _enrich("enter", side, symbol, entry, stop, target,
                            size_pct, confidence, reasoning,
-                           v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
+                           v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note,
+                           alert_ts=bar_ts)
 
         if regime == "bear":
             if decorr < 0.7:
@@ -814,7 +818,8 @@ def decide_trade(alert: dict) -> TradeDecision:
                           f"mom={mom_score:.2f}. RISK_OFF — quarter size. R:R={rr:.2f}.{breadth_note}")
             return _enrich("enter", side, symbol, entry, stop, target,
                            size_pct, confidence, reasoning,
-                           v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
+                           v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note,
+                           alert_ts=bar_ts)
 
     # Full-size: bull-regime longs + all shorts that cleared the regime gate
     if is_short_watch and side == "short":
@@ -832,7 +837,8 @@ def decide_trade(alert: dict) -> TradeDecision:
 
     return _enrich("enter", side, symbol, entry, stop, target,
                    size_pct, confidence, reasoning,
-                   v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note)
+                   v2_regime, v2_reason, ctx, rr, rs, cat_str, cat_note,
+                   alert_ts=bar_ts)
 
 
 def decide_trade_with_llm(alert: dict, anthropic_api_key: str) -> TradeDecision:
@@ -1075,6 +1081,7 @@ def evaluate_open_trades_live():
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
 
     closed = 0
+    pending_notifs = []
     now    = datetime.now(timezone.utc)
     for t in rows:
         try:
@@ -1137,18 +1144,14 @@ def evaluate_open_trades_live():
                 t1_closed = True
                 print(f"[live-eval] #{t['trade_id']} {t['symbol']} T1 hit @ {t1_p:.6g} "
                       f"(+{t1_pnl:.2f}%) — stop moved to breakeven.", flush=True)
-                try:
-                    from notifier import notify_trade_closed
-                    notify_trade_closed({
-                        "trade_id": t["trade_id"], "symbol": t["symbol"],
-                        "status": "tranche1", "pnl_pct": t1_pnl,
-                        "entry_price": entry, "exit_price": t1_p,
-                        "size_pct": (t.get("size_pct") or 0) * 0.5,
-                        "signal_id": t.get("signal_id"),
-                        "thesis": t.get("thesis", ""),
-                    })
-                except Exception as e:
-                    print(f"[notifier] T1 notify failed #{t['trade_id']}: {e}", flush=True)
+                pending_notifs.append({
+                    "trade_id": t["trade_id"], "symbol": t["symbol"],
+                    "status": "tranche1", "pnl_pct": t1_pnl,
+                    "entry_price": entry, "exit_price": t1_p,
+                    "size_pct": (t.get("size_pct") or 0) * 0.5,
+                    "signal_id": t.get("signal_id"),
+                    "thesis": t.get("thesis", ""),
+                })
 
         # ── Step C: check full close (trailing stop or full target) ──────────
         status, exit_p = None, None
@@ -1186,23 +1189,25 @@ def evaluate_open_trades_live():
             label = "trailing stop" if (t1_closed and status == "stopped") else status
             print(f"[live-eval] #{t['trade_id']} {t['symbol']} {label.upper()} "
                   f"P&L {pnl:+.2f}% | {tag}", flush=True)
-            try:
-                from notifier import notify_trade_closed
-                notify_trade_closed({
-                    "trade_id": t["trade_id"], "symbol": t["symbol"],
-                    "status": status, "pnl_pct": pnl,
-                    "entry_price": entry, "exit_price": exit_p,
-                    "size_pct": t.get("size_pct"),
-                    "signal_id": t.get("signal_id"),
-                    "thesis": t.get("thesis", ""),
-                    "outcome_tag": tag,
-                    "tranche1_already_closed": t1_closed,
-                })
-            except Exception as e:
-                print(f"[notifier] Close notify failed #{t['trade_id']}: {e}", flush=True)
+            pending_notifs.append({
+                "trade_id": t["trade_id"], "symbol": t["symbol"],
+                "status": status, "pnl_pct": pnl,
+                "entry_price": entry, "exit_price": exit_p,
+                "size_pct": t.get("size_pct"),
+                "signal_id": t.get("signal_id"),
+                "thesis": t.get("thesis", ""),
+                "outcome_tag": tag,
+                "tranche1_already_closed": t1_closed,
+            })
 
     conn.commit()
     conn.close()
+    for payload in pending_notifs:
+        try:
+            from notifier import notify_trade_closed
+            notify_trade_closed(payload)
+        except Exception as e:
+            print(f"[notifier] Notify failed #{payload.get('trade_id')}: {e}", flush=True)
     if closed:
         print(f"[live-eval] Closed {closed} trade(s) on live prices.", flush=True)
     return closed

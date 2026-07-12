@@ -264,8 +264,6 @@ def _run_opportunity_scan():
                             log_rejection(alert_id, decision, risk_reason)
                     except Exception as e:
                         print(f"[scanner] Risk check error {sym_pair}: {e}", flush=True)
-                        ai_trader.open_paper_trade(decision, alert_id)
-                        opened += 1
 
         # Top-10 picks: scan for both long and short
         for pick in picks:
@@ -483,8 +481,7 @@ def webhook():
             else:
                 trade_id = ai_trader.open_paper_trade(decision, alert_id)
         except Exception as e:
-            print(f"[risk] Monitor error (bypassing): {e}", flush=True)
-            trade_id = ai_trader.open_paper_trade(decision, alert_id)
+            print(f"[risk] Monitor error (failing closed): {e}", flush=True)
 
     print(f"[alert {alert_id}] {data.get('symbol')}: "
           f"{decision.action.upper()} - {decision.reasoning}")

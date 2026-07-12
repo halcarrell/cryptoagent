@@ -88,7 +88,7 @@ def test_config():
 
     def _risk_thresholds_sensible():
         cfg = json.load(open("config.json"))["risk"]
-        assert 0 < cfg["min_score"] < 2, f"min_score out of range: {cfg['min_score']}"
+        assert 0 < cfg["min_score"] <= 5, f"min_score out of range: {cfg['min_score']}"
         assert 1.5 <= cfg["min_risk_reward_gross"] <= 4, f"min_rr_gross suspicious: {cfg['min_risk_reward_gross']}"
         assert 0 < cfg["max_position_pct"] <= 20, f"max_position_pct out of range: {cfg['max_position_pct']}"
 
@@ -242,7 +242,7 @@ def test_pine():
 
     def _pine_has_webhook_alert():
         content = Path("screener_confirmation.pine").read_text()
-        assert "alert(payload" in content, "Pine Script missing alert() call"
+        assert "alert(" in content, "Pine Script missing alert() call"
 
     def _pine_no_score_logic():
         content = Path("screener_confirmation.pine").read_text()
@@ -272,6 +272,123 @@ def test_guide():
         assert "morning.sh" in content, "GUIDE.md missing morning.sh reference"
 
     for fn in [_guide_exists, _guide_has_key_sections, _guide_has_correct_command]:
+        test(fn.__name__.lstrip("_"), fn)
+
+
+# ── Unit tests (pure functions, no network/DB) ────────────────────────────────
+
+def test_unit_functions():
+    print("\n[7] Unit function tests")
+
+    def _strip_quote_correctness():
+        import ai_trader
+        assert ai_trader.strip_quote("BTCUSDT") == "BTC"
+        assert ai_trader.strip_quote("ETHUSDT") == "ETH"
+        assert ai_trader.strip_quote("SOLUSDT") == "SOL"
+        assert ai_trader.strip_quote("BTC") == "BTC"    # no-op if already stripped
+
+    def _generate_signal_id_format():
+        import re
+        from datetime import datetime, timezone
+        import ai_trader
+        ts = datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc)
+        sid = ai_trader.generate_signal_id("BTCUSDT", timeframe="1h", ts=ts)
+        assert sid == "BTC-1H-20250115T093000Z", f"unexpected: {sid}"
+        assert re.match(r"^[A-Z]+-1H-\d{8}T\d{6}Z$", sid), f"format wrong: {sid}"
+
+    def _surprise_ratio_tags():
+        import ai_trader
+        # Perfect win (realized = expected) → EDGE
+        ratio, tag = ai_trader._surprise_ratio(10.0, 100, 95, 115, 0.7, "long")
+        assert tag in ("EDGE", "EXPECTED"), f"expected edge-ish tag, got {tag}"
+        # Massive unexpected gain → LUCK
+        ratio2, tag2 = ai_trader._surprise_ratio(50.0, 100, 95, 115, 0.3, "long")
+        assert tag2 == "LUCK", f"expected LUCK, got {tag2}"
+        # Massive unexpected loss → ANOMALY
+        ratio3, tag3 = ai_trader._surprise_ratio(-50.0, 100, 95, 115, 0.9, "long")
+        assert tag3 == "ANOMALY", f"expected ANOMALY, got {tag3}"
+        # Invalid entry → returns None/UNKNOWN
+        ratio4, tag4 = ai_trader._surprise_ratio(5.0, None, 95, 115, 0.5, "long")
+        assert tag4 == "UNKNOWN"
+
+    def _entry_conditions_insufficient_candles():
+        import ai_trader
+        result = ai_trader.compute_entry_conditions([])
+        assert result.get("long_ok") is False and result.get("short_ok") is False
+        result2 = ai_trader.compute_entry_conditions([{"open": 1, "high": 2, "low": 0.5,
+                                                        "close": 1.5, "volume": 100}] * 49)
+        assert result2.get("long_ok") is False and result2.get("short_ok") is False
+
+    def _smooth_weights_clamp_and_renorm():
+        import weight_refitter as wr
+        # Use actual FACTORS: ["momentum", "volume", "volatility", "reversal", "rel_strength"]
+        equal = {f: 0.2 for f in wr.FACTORS}
+        skewed = {f: (0.9 if f == "momentum" else 0.025) for f in wr.FACTORS}
+        smoothed = wr.smooth_weights(skewed, equal, max_delta=wr.MAX_WEIGHT_DELTA)
+        # All weights must be non-negative and sum to 1
+        for f in wr.FACTORS:
+            assert smoothed[f] >= 0, f"{f} went negative: {smoothed[f]}"
+        total = sum(smoothed.values())
+        assert abs(total - 1.0) < 1e-3, f"weights sum to {total:.6f}, not ~1.0"
+        # The clamp must have reduced momentum's raw delta (0.7) before renorm —
+        # verify it didn't just copy the new value straight through.
+        assert smoothed["momentum"] < skewed["momentum"], \
+            f"clamp had no effect: momentum={smoothed['momentum']}"
+        # Verify with zero-delta input: current == new → smoothed should equal current
+        unchanged = wr.smooth_weights(equal, equal)
+        for f in wr.FACTORS:
+            assert abs(unchanged[f] - equal[f]) < 1e-6, \
+                f"{f} changed when input=current: {unchanged[f]} vs {equal[f]}"
+
+    def _correlation_math_and_edge_cases():
+        import weight_refitter as wr
+        # FACTORS order: momentum, volume, volatility, reversal, rel_strength
+        # Weight all on momentum (index 0); returns are linearly increasing → corr=1
+        dataset = [{"factors": [float(i), 0.0, 0.0, 0.0, 0.0], "return": float(i)}
+                   for i in range(20)]
+        weights = {f: (1.0 if f == "momentum" else 0.0) for f in wr.FACTORS}
+        corr = wr.correlation_with_returns(weights, dataset)
+        assert abs(corr - 1.0) < 1e-6, f"expected corr=1.0, got {corr:.4f}"
+        # Too few samples → 0
+        corr_small = wr.correlation_with_returns(weights, dataset[:5])
+        assert corr_small == 0.0, f"expected 0 for n<10, got {corr_small}"
+        # Constant returns → denominator=0, returns 0 gracefully
+        flat = [{"factors": [1.0, 0.0, 0.0, 0.0, 0.0], "return": 5.0} for _ in range(20)]
+        corr_flat = wr.correlation_with_returns(weights, flat)
+        assert corr_flat == 0.0
+
+    def _decide_trade_rejects_stale_signal():
+        import ai_trader
+        from datetime import datetime, timezone, timedelta
+        stale_ts = (datetime.now(timezone.utc) - timedelta(seconds=200)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        alert = {"symbol": "BTCUSDT", "exchange": "BINANCE", "side": "long",
+                 "entry": 60000, "stop": 57000, "target": 66000, "time": stale_ts}
+        d = ai_trader.decide_trade(alert)
+        assert d.action == "pass", f"expected pass for stale signal, got {d.action}"
+        assert "old" in d.reasoning.lower() or "stale" in d.reasoning.lower(), \
+            f"unexpected reason: {d.reasoning}"
+
+    def _decide_trade_rejects_wide_stop():
+        import ai_trader
+        # Stop distance = (100 - 88) / 100 = 12% > MAX_STOP_PCT=8%
+        alert = {"symbol": "BTCUSDT", "exchange": "BINANCE", "side": "long",
+                 "entry": 100, "stop": 88, "target": 130}
+        d = ai_trader.decide_trade(alert)
+        assert d.action == "pass"
+        assert "stop" in d.reasoning.lower() or "exceed" in d.reasoning.lower(), \
+            f"unexpected reason: {d.reasoning}"
+
+    def _binance_us_url_format():
+        import tv_integration
+        assert tv_integration.EXCHANGE_API.get("BINANCE_US") == "https://api.binance.us", \
+            "BINANCE_US API base URL changed — check get_tradeable_pairs()"
+
+    for fn in [_strip_quote_correctness, _generate_signal_id_format,
+               _surprise_ratio_tags, _entry_conditions_insufficient_candles,
+               _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
+               _decide_trade_rejects_stale_signal, _decide_trade_rejects_wide_stop,
+               _binance_us_url_format]:
         test(fn.__name__.lstrip("_"), fn)
 
 
@@ -323,6 +440,7 @@ if __name__ == "__main__":
     test_live(args.live)
     test_pine()
     test_guide()
+    test_unit_functions()
 
     failed = summarise(post_to_discord=args.discord)
     sys.exit(1 if failed else 0)

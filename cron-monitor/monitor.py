@@ -22,10 +22,12 @@ def run():
         picks_fresh = False
         open_trades = 0
 
-    # Screener runs at 13:00 UTC. Before then, picks_fresh is always False —
-    # not a problem, just timing. Only flag it if it's past 14:00 UTC and still stale.
+    # Screener runs at 13:00 UTC. picks_fresh is False before then — not a problem.
+    # Flag a concern only when BOTH today AND yesterday have no picks, meaning the
+    # screener has missed at least one full day (not just the pre-13:00 window).
     now_utc = datetime.now(timezone.utc)
-    picks_concern = not picks_fresh and now_utc.hour >= 14
+    picks_yesterday = data.get("picks_yesterday", 0)
+    picks_concern = not picks_fresh and picks_yesterday == 0
 
     if alerts == -1:
         title = "⚠️ Monitor Error"
