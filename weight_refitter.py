@@ -31,13 +31,14 @@ from pathlib import Path
 DB_PATH      = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 WEIGHTS_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db")).parent / "weights.json"
 
-FACTORS = ["momentum", "volume", "volatility", "reversal", "rel_strength"]
+FACTORS = ["momentum", "volume", "volatility", "reversal", "rel_strength", "decorrelation"]
 CURRENT_WEIGHTS = {
-    "momentum":     0.35,
-    "volume":       0.20,
-    "volatility":   0.15,
-    "reversal":     0.15,
-    "rel_strength": 0.15,
+    "momentum":      0.32,
+    "volume":        0.18,
+    "volatility":    0.14,
+    "reversal":      0.14,
+    "rel_strength":  0.12,
+    "decorrelation": 0.10,
 }
 
 MIN_OBS_FOR_REFIT = 100   # below this, refusing to fit
@@ -103,18 +104,18 @@ def build_dataset(start_date: str = None, end_date: str = None,
 
     cur.execute(f"""
         SELECT pick_date, coin_id, symbol, momentum, volume, volatility,
-               reversal, rel_strength
+               reversal, rel_strength, decorrelation
         FROM factor_scores {where_clause}
         ORDER BY pick_date, coin_id
     """, params)
     rows = cur.fetchall()
 
     dataset = []
-    for date, coin_id, symbol, mom, vol, volat, rev, rs in rows:
+    for date, coin_id, symbol, mom, vol, volat, rev, rs, decorr in rows:
         cur.execute("""
             SELECT price FROM snapshots
-            WHERE symbol = ? AND snapshot_date = ?
-        """, (symbol, date))
+            WHERE coin_id = ? AND snapshot_date = ?
+        """, (coin_id, date))
         entry = cur.fetchone()
         if not entry or not entry[0]:
             continue
@@ -122,9 +123,9 @@ def build_dataset(start_date: str = None, end_date: str = None,
         target_date = (datetime.fromisoformat(date) + timedelta(days=forward_days)).date().isoformat()
         cur.execute("""
             SELECT price FROM snapshots
-            WHERE symbol = ? AND snapshot_date >= ?
+            WHERE coin_id = ? AND snapshot_date >= ?
             ORDER BY snapshot_date ASC LIMIT 1
-        """, (symbol, target_date))
+        """, (coin_id, target_date))
         exit_row = cur.fetchone()
         if not exit_row or not exit_row[0]:
             continue
@@ -133,7 +134,7 @@ def build_dataset(start_date: str = None, end_date: str = None,
         dataset.append({
             "pick_date": date,
             "coin_id":   coin_id,
-            "factors":   [mom, vol, volat, rev, rs],
+            "factors":   [mom, vol, volat, rev, rs, decorr or 0.0],
             "return":    ret,
         })
 
@@ -183,7 +184,7 @@ def correlation_with_returns(weights: dict, dataset: list) -> float:
     n = len(dataset)
     if n < 10:
         return 0.0
-    composite = [sum(weights[FACTORS[j]] * d["factors"][j] for j in range(5)) for d in dataset]
+    composite = [sum(weights[FACTORS[j]] * d["factors"][j] for j in range(len(FACTORS))) for d in dataset]
     returns   = [d["return"] for d in dataset]
     mean_c, mean_r = sum(composite) / n, sum(returns) / n
     cov   = sum((composite[i] - mean_c) * (returns[i] - mean_r) for i in range(n))
@@ -405,20 +406,20 @@ def auto_tune_config():
     if contiguous_good:
         new_min = BOUNDS[contiguous_good[-1]]
 
-    # Recommended max: walk from top down; cap at first bucket with negative avg_3d
+    # Recommended max: cap below the highest-scoring bucket with negative avg_3d.
+    # Walk top-down; take the first (highest) negative bucket and stop.
     new_max = eff_max
     for bk in reversed(ORDER):
         b = bmap.get(bk)
         if b and b["n"] >= 5 and (b.get("avg_3d") or 0) < 0:
             new_max = BOUNDS[bk]
-        else:
             break
 
     now_iso = datetime.now(timezone.utc).isoformat()
     changes = []
     for key, current, proposed in [("min_score", eff_min, new_min),
                                     ("max_score",  eff_max, new_max)]:
-        if abs(proposed - current) >= 0.1:
+        if proposed is not None and current is not None and abs(proposed - current) >= 0.1:
             reason = (f"Auto-tuned from {total_n} picks: "
                       f"bucket analysis suggests {key}={proposed:.1f}")
             cur.execute("""

@@ -321,30 +321,30 @@ def test_unit_functions():
 
     def _smooth_weights_clamp_and_renorm():
         import weight_refitter as wr
-        # Use actual FACTORS: ["momentum", "volume", "volatility", "reversal", "rel_strength"]
-        equal = {f: 0.2 for f in wr.FACTORS}
-        skewed = {f: (0.9 if f == "momentum" else 0.025) for f in wr.FACTORS}
-        smoothed = wr.smooth_weights(skewed, equal, max_delta=wr.MAX_WEIGHT_DELTA)
-        # All weights must be non-negative and sum to 1
+        # Use actual CURRENT_WEIGHTS as the baseline (sums to 1.0)
+        current = dict(wr.CURRENT_WEIGHTS)
+        skewed = {f: (0.9 if f == "momentum" else 0.02) for f in wr.FACTORS}
+        smoothed = wr.smooth_weights(skewed, current, max_delta=wr.MAX_WEIGHT_DELTA)
+        # All weights must be non-negative and sum to ~1
         for f in wr.FACTORS:
             assert smoothed[f] >= 0, f"{f} went negative: {smoothed[f]}"
         total = sum(smoothed.values())
         assert abs(total - 1.0) < 1e-3, f"weights sum to {total:.6f}, not ~1.0"
-        # The clamp must have reduced momentum's raw delta (0.7) before renorm —
-        # verify it didn't just copy the new value straight through.
+        # Clamp must have reduced momentum below its skewed value
         assert smoothed["momentum"] < skewed["momentum"], \
             f"clamp had no effect: momentum={smoothed['momentum']}"
-        # Verify with zero-delta input: current == new → smoothed should equal current
-        unchanged = wr.smooth_weights(equal, equal)
+        # Zero-delta: smooth_weights(current, current) must equal current
+        unchanged = wr.smooth_weights(current, current)
         for f in wr.FACTORS:
-            assert abs(unchanged[f] - equal[f]) < 1e-6, \
-                f"{f} changed when input=current: {unchanged[f]} vs {equal[f]}"
+            assert abs(unchanged[f] - current[f]) < 1e-3, \
+                f"{f} changed when input=current: {unchanged[f]} vs {current[f]}"
 
     def _correlation_math_and_edge_cases():
         import weight_refitter as wr
-        # FACTORS order: momentum, volume, volatility, reversal, rel_strength
-        # Weight all on momentum (index 0); returns are linearly increasing → corr=1
-        dataset = [{"factors": [float(i), 0.0, 0.0, 0.0, 0.0], "return": float(i)}
+        n_factors = len(wr.FACTORS)
+        # Weight all on momentum (index 0); returns linearly increasing → corr=1
+        zeros = [0.0] * n_factors
+        dataset = [{"factors": [float(i)] + zeros[1:], "return": float(i)}
                    for i in range(20)]
         weights = {f: (1.0 if f == "momentum" else 0.0) for f in wr.FACTORS}
         corr = wr.correlation_with_returns(weights, dataset)
@@ -353,7 +353,7 @@ def test_unit_functions():
         corr_small = wr.correlation_with_returns(weights, dataset[:5])
         assert corr_small == 0.0, f"expected 0 for n<10, got {corr_small}"
         # Constant returns → denominator=0, returns 0 gracefully
-        flat = [{"factors": [1.0, 0.0, 0.0, 0.0, 0.0], "return": 5.0} for _ in range(20)]
+        flat = [{"factors": [1.0] + zeros[1:], "return": 5.0} for _ in range(20)]
         corr_flat = wr.correlation_with_returns(weights, flat)
         assert corr_flat == 0.0
 

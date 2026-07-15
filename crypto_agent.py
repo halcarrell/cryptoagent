@@ -469,8 +469,9 @@ def cmd_evaluate(conn):
                 continue
             target = (pick_dt + timedelta(days=horizon)).strftime("%Y-%m-%d")
             cur.execute(
-                "SELECT price FROM snapshots WHERE snapshot_date = ? AND coin_id = ?",
-                (target, coin_id),
+                "SELECT price FROM snapshots WHERE coin_id = ? AND snapshot_date >= ?"
+                " ORDER BY snapshot_date ASC LIMIT 1",
+                (coin_id, target),
             )
             row = cur.fetchone()
             if not row or not row[0]:
