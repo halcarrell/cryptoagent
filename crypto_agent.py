@@ -318,8 +318,10 @@ def compute_signals(coins, btc_change_7d, correlations=None):
     # Log-transform ATL distance before z-scoring: raw values span 100% to 4,700,000%
     # (new coins vs BTC), making the distribution so skewed that all picks cluster at z≈0.
     atl_dist_log   = [math.log1p(max(0, c.get("atl_change_percentage") or 0)) for c in eligible]
-    # BTC correlation for decorrelation factor — lower corr → higher score
-    corr_vals      = [correlations.get(c["id"], 0.0) if correlations else 0.0 for c in eligible]
+    # BTC correlation for decorrelation factor — lower ABSOLUTE corr → higher score.
+    # Use abs() so high inverse correlation (-0.9) is treated the same as high positive
+    # correlation (+0.9): both coins are driven by BTC, just in opposite directions.
+    corr_vals      = [abs(correlations.get(c["id"], 0.0)) if correlations else 0.0 for c in eligible]
     # Cross-sectional relative-strength: excess 7d return vs BTC, z-scored so it
     # sits on the same scale as every other factor (mean 0, std ~1).
     rs_vals        = [m7 - btc_change_7d for m7 in momentum_7d]
@@ -331,7 +333,7 @@ def compute_signals(coins, btc_change_7d, correlations=None):
         m24     = c.get("price_change_percentage_24h_in_currency") or 0
         vr      = c["total_volume"] / c["market_cap"]
         atl_log = math.log1p(max(0, c.get("atl_change_percentage") or 0))
-        corr    = correlations.get(c["id"], 0.0) if correlations else 0.0
+        corr    = abs(correlations.get(c["id"], 0.0)) if correlations else 0.0
 
         # 30d lookback is academically optimal for cross-sectional crypto momentum
         # (Starkiller Capital 2022, SSRN 4675565). Blended 24h+7d+30d reduces
