@@ -49,7 +49,7 @@ EXCLUDE_KEYWORDS = [
 # late-stage pump — fade risk outweighs chance opportunity.
 MAX_7D_CHANGE_PCT  = 60.0  # drop coins up > 60% in 7 days
 MAX_24H_CHANGE_PCT = 25.0  # drop coins up > 25% in 24 hours
-MAX_RS_SCORE       = 5.0   # drop coins with extreme relative-strength z-score
+MAX_RS_SCORE       = 3.0   # drop coins with extreme relative-strength z-score (3σ)
 EVAL_HORIZONS = [1, 3, 7]
 REQUEST_DELAY = 2.5  # seconds between API calls — increased for free-tier stability
 
@@ -307,6 +307,7 @@ def compute_signals(coins, btc_change_7d, correlations=None):
         and c.get("price_change_percentage_24h_in_currency") is not None
         and abs(c.get("price_change_percentage_7d_in_currency") or 0) <= MAX_7D_CHANGE_PCT
         and abs(c.get("price_change_percentage_24h_in_currency") or 0) <= MAX_24H_CHANGE_PCT
+        and (c.get("symbol") or "").upper().isascii()  # skip non-ASCII tickers
     ]
 
     momentum_7d    = [c.get("price_change_percentage_7d_in_currency")  or 0 for c in eligible]
@@ -319,6 +320,9 @@ def compute_signals(coins, btc_change_7d, correlations=None):
     atl_dist_log   = [math.log1p(max(0, c.get("atl_change_percentage") or 0)) for c in eligible]
     # BTC correlation for decorrelation factor — lower corr → higher score
     corr_vals      = [correlations.get(c["id"], 0.0) if correlations else 0.0 for c in eligible]
+    # Cross-sectional relative-strength: excess 7d return vs BTC, z-scored so it
+    # sits on the same scale as every other factor (mean 0, std ~1).
+    rs_vals        = [m7 - btc_change_7d for m7 in momentum_7d]
 
     scored = []
     for c in eligible:
@@ -338,7 +342,7 @@ def compute_signals(coins, btc_change_7d, correlations=None):
         volume        = zscore(vol_ratio, vr)
         volatility    = zscore(abs_change_24h, abs(m24))
         reversal      = -zscore(atl_dist_log, atl_log)  # closer to ATL = more recovery room
-        rs            = (m7 - btc_change_7d) / 10       # rough scaling
+        rs            = zscore(rs_vals, m7 - btc_change_7d)
         decorrelation = -zscore(corr_vals, corr)         # lower BTC corr = higher score
 
         composite = (
@@ -587,7 +591,7 @@ def cmd_backtest(conn):
     print(f"3d realized returns over {len(rows)} pick-dates:")
     eq = 1.0
     for date, avg_ret in rows:
-        eq *= 1 + (avg_ret or 0) / 100 / 3  # daily-step approximation
+        eq *= 1 + (avg_ret or 0) / 100
         print(f"  {date}: avg_3d={avg_ret:+6.2f}%   equity={eq:.4f}x")
 
 
