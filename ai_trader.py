@@ -883,7 +883,7 @@ Hard rules:
 - Reject if not in screener top 10 (no context).
 - Reject if R:R < {MIN_RISK_REWARD}.
 - Reject if score < {MIN_SCORE_TO_TRADE}.
-- Reject if score > {MAX_SCORE_TO_TRADE} (overextended — late-stage breakout risk).
+- {"No upper score cap." if MAX_SCORE_TO_TRADE is None else f"Reject if score > {MAX_SCORE_TO_TRADE} (overextended — late-stage breakout risk)."}
 - In BEAR regime: reject longs unless decorrelation_score > 1.5 in context; use 25% of normal size.
 - In SIDEWAYS regime: allow longs with decorrelation_score > 0.5; use 50% of normal size.
 - Size 0-{MAX_POSITION_PCT}% based on confidence.

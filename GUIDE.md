@@ -157,6 +157,7 @@ TradingView supports direct order placement when connected to Coinbase Advanced 
 | Daily 1pm UTC | ⚡ Strong Signals alert fires if exceptional conditions detected |
 | Daily 2pm UTC | Self-test: 5 live endpoint checks, posts ✅/⚠/🔴 report to Discord |
 | Sunday 2pm UTC | Weight refitter runs, posts results to Discord |
+| Every 15 min, 06–23 UTC | Session scanner checks top picks + short-watch coins for live Binance 1H entry conditions; opens paper trades directly without waiting for a TradingView bar close |
 | Always on | Webhook server receives TradingView alerts 24/7 |
 | Always on | Every 4H at :15 UTC — live price evaluation of open paper trades |
 
@@ -213,10 +214,11 @@ Edit `config.json`:
     "ath_within_pct": 20.0      ← raise to widen the ATH proximity window
   },
   "risk": {
-    "min_risk_reward_gross": 2.0,  ← minimum R:R before fees
-    "min_risk_reward_net":   1.6,  ← minimum R:R after 0.1% round-trip fees
+    "min_risk_reward_gross": 2.48, ← minimum R:R before fees
+    "min_risk_reward_net":   1.98, ← minimum R:R after 0.1% round-trip fees
     "max_position_pct":      5.0,  ← max % of portfolio per trade
-    "min_score":             1.2   ← minimum screener score to trade (z-score scale)
+    "min_score":             2.5,  ← minimum screener score to trade (auto-tuned weekly)
+    "max_score":             3.0   ← cap for overextended coins (set null to disable)
   }
 }
 ```
@@ -228,7 +230,7 @@ Push to GitHub — Railway redeploys automatically.
 The screener automatically drops coins that have already pumped:
 - >60% move in 7 days
 - >25% move in 24 hours
-- Relative strength z-score >5
+- Relative strength z-score >3.0
 
 These are late-stage pumps — entry risk outweighs opportunity.
 
@@ -282,7 +284,7 @@ Review `weights.json` before manually updating `WEIGHTS` in `crypto_agent.py`.
 | Watchlist has only 2-3 coins | Normal on some days — Binance.US + Coinbase combined still excludes obscure tokens |
 | Pump tokens in picks | Pump guard is active (60%/7d, 25%/24h) — if still appearing, lower thresholds in `crypto_agent.py` |
 | Stablecoin or pegged token in picks | Price-stability filter should catch it — check if price is near $1 with <3% 30d move |
-| No paper trades opening | Check `min_score` in `config.json` (currently 1.2) — if everything is "pass", screener score may be below threshold |
+| No paper trades opening | Check `min_score` in `config.json` (currently 2.5; auto-tuned by weekly refitter) — if everything is "pass", screener score may be below threshold |
 | Alerts disappeared in TradingView | Re-create them — alerts occasionally expire or get removed |
 | Daily test agent not posting | Check claude.ai conversations list for the agent run output; confirm GitHub repo is public |
 
@@ -351,19 +353,20 @@ P&L +15.9% ≈ +$80
 
 ### What the Scores Mean
 
-| Factor | Weight | What it measures |
+| Factor | Approx. Weight | What it measures |
 |---|---|---|
-| Momentum | 35% | Price strength vs the rest of the market |
-| Volume | 20% | Unusual volume relative to market cap |
-| Volatility | 15% | Moving more than peers |
-| Reversal | 15% | Distance from all-time low |
-| Relative strength | 15% | Outperforming Bitcoin over 7 days |
+| Momentum | ~32% | Price strength vs the rest of the market |
+| Volume | ~18% | Unusual volume relative to market cap |
+| Volatility | ~14% | Moving more than peers |
+| Reversal | ~14% | Distance from all-time low |
+| Relative strength | ~12% | Outperforming Bitcoin over 7 days |
+| **Decorrelation** | **10%** | **Low 30-day correlation with BTC — moves independently** |
 
-- Score **> 1.2** → qualifies for trading
+- Score **> 2.5** → qualifies for trading (auto-tuned by weekly weight refitter)
 - Score **> 2.5** → exceptional — flagged as Strong Signal
 - Score **> 3.0** → very rare, pay close attention
 
-> Scores are cross-sectional z-scores — a score of +1.2 means the coin is outperforming ~88% of the universe on composite factors that day.
+> Scores are cross-sectional z-scores — a score of +2.5 means the coin is outperforming ~99% of the universe on composite factors that day. Weights are updated weekly by the weight refitter.
 
 ### When Signals Fire
 

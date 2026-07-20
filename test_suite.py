@@ -65,8 +65,9 @@ def test_imports():
     def _notifier(): import notifier
     def _tv_integration(): import tv_integration
     def _weight_refitter(): import weight_refitter
+    def _risk_monitor(): import risk_monitor
 
-    for fn in [_crypto_agent, _ai_trader, _notifier, _tv_integration, _weight_refitter]:
+    for fn in [_crypto_agent, _ai_trader, _notifier, _tv_integration, _weight_refitter, _risk_monitor]:
         test(fn.__name__.lstrip("_"), fn)
 
 
@@ -392,6 +393,56 @@ def test_unit_functions():
         test(fn.__name__.lstrip("_"), fn)
 
 
+# ── Risk monitor ──────────────────────────────────────────────────────────────
+
+def test_risk_monitor():
+    print("\n[8] Risk monitor unit tests")
+
+    def _strip_quote_matches_ai_trader():
+        import risk_monitor, ai_trader
+        for sym in ("BTCUSDT", "ETHUSDC", "SOLUSDT", "AKT"):
+            assert risk_monitor._strip_quote(sym) == ai_trader.strip_quote(sym), \
+                f"strip_quote mismatch for {sym}"
+
+    def _correlation_too_few_samples():
+        import risk_monitor
+        assert risk_monitor._correlation([1, 2], [1, 2]) is None, \
+            "correlation should be None for n < 10"
+        assert risk_monitor._correlation([], []) is None, \
+            "correlation should be None for empty lists"
+
+    def _correlation_perfect_positive():
+        import risk_monitor
+        vals = list(range(10))
+        result = risk_monitor._correlation(vals, vals)
+        assert result is not None and abs(result - 1.0) < 1e-6, \
+            f"expected 1.0, got {result}"
+
+    def _correlation_perfect_negative():
+        import risk_monitor
+        a = list(range(10))
+        b = [-x for x in a]
+        result = risk_monitor._correlation(a, b)
+        assert result is not None and abs(result + 1.0) < 1e-6, \
+            f"expected -1.0, got {result}"
+
+    def _risk_constants_sensible():
+        import risk_monitor
+        assert 0 < risk_monitor.MAX_TOTAL_EXPOSURE <= 100, \
+            f"MAX_TOTAL_EXPOSURE suspicious: {risk_monitor.MAX_TOTAL_EXPOSURE}"
+        assert 1 <= risk_monitor.MAX_OPEN_TRADES <= 20, \
+            f"MAX_OPEN_TRADES suspicious: {risk_monitor.MAX_OPEN_TRADES}"
+        assert 0 < risk_monitor.MAX_CORRELATION <= 1, \
+            f"MAX_CORRELATION suspicious: {risk_monitor.MAX_CORRELATION}"
+        assert risk_monitor.CB_LOSS_THRESHOLD < 0, \
+            f"CB_LOSS_THRESHOLD should be negative: {risk_monitor.CB_LOSS_THRESHOLD}"
+
+    for fn in [_strip_quote_matches_ai_trader, _correlation_too_few_samples,
+               _correlation_perfect_positive, _correlation_perfect_negative,
+               _risk_constants_sensible]:
+        test(fn.__name__.lstrip("_"), fn)
+
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 def summarise(post_to_discord: bool = False):
@@ -441,6 +492,7 @@ if __name__ == "__main__":
     test_pine()
     test_guide()
     test_unit_functions()
+    test_risk_monitor()
 
     failed = summarise(post_to_discord=args.discord)
     sys.exit(1 if failed else 0)
