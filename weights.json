@@ -1,22 +1,22 @@
 {
-  "generated_at": "2026-05-26T13:21:55.840683+00:00",
-  "training_start": "2026-04-11",
-  "training_end": "2026-05-26",
-  "n_observations": 1856,
+  "generated_at": "2026-07-12T14:05:00.045221+00:00",
+  "training_start": "2026-05-28",
+  "training_end": "2026-07-12",
+  "n_observations": 429,
   "forward_days": 3,
   "raw_fit": {
-    "momentum": 0.0292,
-    "volume": 0.4382,
-    "volatility": 0.3114,
-    "reversal": 0.2212,
+    "momentum": 0.0,
+    "volume": 0.2987,
+    "volatility": 0.0,
+    "reversal": 0.7013,
     "rel_strength": 0.0
   },
   "weights": {
-    "momentum": 0.2334,
-    "volume": 0.2801,
-    "volatility": 0.2334,
-    "reversal": 0.2065,
-    "rel_strength": 0.0467
+    "momentum": 0.2782,
+    "volume": 0.3324,
+    "volatility": 0.0556,
+    "reversal": 0.2782,
+    "rel_strength": 0.0556
   },
   "previous": {
     "momentum": 0.35,
