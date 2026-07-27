@@ -604,12 +604,11 @@ def detect_strong_signals(conn, date: str) -> list:
     2. Volume score >= surge threshold (unusual buying activity)
     3. Price within X% of all-time high (breakout candidate)
     """
-    import json as _json
     cfg_path = Path(__file__).parent / "config.json"
     ss_cfg = {}
     if cfg_path.exists():
         with open(cfg_path) as f:
-            ss_cfg = _json.load(f).get("strong_signals", {})
+            ss_cfg = json.load(f).get("strong_signals", {})
 
     score_thresh  = ss_cfg.get("score_exceptional", 2.5)
     vol_thresh    = ss_cfg.get("volume_surge_score", 3.0)

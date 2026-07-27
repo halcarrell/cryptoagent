@@ -419,14 +419,22 @@ def auto_tune_config():
     changes = []
     for key, current, proposed in [("min_score", eff_min, new_min),
                                     ("max_score",  eff_max, new_max)]:
-        if proposed is not None and current is not None and abs(proposed - current) >= 0.1:
-            reason = (f"Auto-tuned from {total_n} picks: "
-                      f"bucket analysis suggests {key}={proposed:.1f}")
-            cur.execute("""
-                INSERT OR REPLACE INTO config_overrides (key, value, updated_at, reason)
-                VALUES (?, ?, ?, ?)
-            """, (key, json.dumps(proposed), now_iso, reason))
-            changes.append((key, current, proposed))
+        if proposed is None:
+            continue
+        # Allow setting max_score for the first time (current=None) as well as
+        # changing it — the old `current is not None` guard prevented auto_tune
+        # from ever writing an initial max_score cap, silently swallowing the
+        # recommendation whenever no cap was previously configured.
+        meaningful_change = current is None or abs(proposed - current) >= 0.1
+        if not meaningful_change:
+            continue
+        reason = (f"Auto-tuned from {total_n} picks: "
+                  f"bucket analysis suggests {key}={proposed:.1f}")
+        cur.execute("""
+            INSERT OR REPLACE INTO config_overrides (key, value, updated_at, reason)
+            VALUES (?, ?, ?, ?)
+        """, (key, json.dumps(proposed), now_iso, reason))
+        changes.append((key, current, proposed))
 
     conn.commit()
     conn.close()
