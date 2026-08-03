@@ -739,8 +739,8 @@ def cmd_daily(conn):
             coverage[f"{h}d"] = round(row[0] or 0.0, 1)
             if coverage[f"{h}d"] < 90 and coverage[f"{h}d"] > 0:
                 warnings.append(f"{h}d realized return coverage is {coverage[f'{h}d']:.0f}% — below 90%")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[daily] Coverage check failed (non-fatal): {e}", flush=True)
 
     # 5. Paper trade stats
     paper_stats = {"open": 0, "total_closed": 0, "hit_rate": 0.0, "avg_pnl": 0.0,
