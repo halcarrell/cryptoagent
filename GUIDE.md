@@ -468,11 +468,11 @@ Discord
 
 | Factor | Default Weight | What it measures |
 |---|---|---|
-| Momentum | ~21% | Price strength vs the rest of the market |
-| Volume | ~25% | Unusual volume relative to market cap |
-| Volatility | ~21% | Moving more than peers |
-| Reversal | ~19% | Distance from all-time low |
-| Relative strength | ~4% | Outperforming Bitcoin over 7 days |
+| Momentum | ~32% | Price strength vs the rest of the market |
+| Volume | ~18% | Unusual volume relative to market cap |
+| Volatility | ~14% | Moving more than peers |
+| Reversal | ~14% | Distance from all-time low |
+| Relative strength | ~14% | Outperforming Bitcoin over 7 days |
 | **Decorrelation** | **10%** | **Low 30d correlation with BTC — independent move** |
 
 > Weights are loaded from `weights.json` (written by the weekly refitter) when available.

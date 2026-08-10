@@ -829,7 +829,7 @@ def cmd_daily(conn):
     except Exception as e:
         print(f"[daily] Discord picks notify failed: {e}", flush=True)
 
-    # 7. Email health report
+    # 8. Email health report
     try:
         send_health_report(
             date=today,

@@ -56,8 +56,17 @@ _COIN_NAMES: dict = {
     "RUNE": ["thorchain"],
     "RNDR": ["render network"],
     "WLD":  ["worldcoin"],
-    "TAO":  ["bittensor"],
-    "STX":  ["stacks"],
+    "TAO":   ["bittensor"],
+    "STX":   ["stacks"],
+    "PEPE":  ["pepe"],
+    "BONK":  ["bonk"],
+    "WIF":   ["dogwifhat", "wif hat"],
+    "TON":   ["toncoin", "the open network"],
+    "FLOKI": ["floki"],
+    "POL":   ["polygon", "pol"],
+    "NOT":   ["notcoin"],
+    "POPCAT":["popcat"],
+    "TRUMP": ["official trump"],
 }
 
 _BULLISH_RE = re.compile(
