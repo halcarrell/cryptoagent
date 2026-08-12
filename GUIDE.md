@@ -353,16 +353,18 @@ P&L +15.9% ≈ +$80
 
 ### What the Scores Mean
 
-| Factor | Approx. Weight | What it measures |
+| Factor | Weight | What it measures |
 |---|---|---|
-| Momentum | ~32% | Price strength vs the rest of the market |
-| Volume | ~18% | Unusual volume relative to market cap |
-| Volatility | ~14% | Moving more than peers |
-| Reversal | ~14% | Distance from all-time low |
-| Relative strength | ~12% | Outperforming Bitcoin over 7 days |
-| **Decorrelation** | **10%** | **Low 30-day correlation with BTC — moves independently** |
+| Momentum | auto-tuned | Price strength vs the rest of the market |
+| Volume | auto-tuned | Unusual volume relative to market cap |
+| Volatility | auto-tuned | Moving more than peers |
+| Reversal | auto-tuned | Distance from all-time low |
+| Relative strength | auto-tuned | Outperforming Bitcoin over 7 days |
+| **Decorrelation** | **fixed 10%** | **Low 30-day correlation with BTC — moves independently** |
 
-- Score **> 2.5** → qualifies for trading (auto-tuned by weekly weight refitter)
+> **Weights are auto-tuned weekly** by the weight refitter based on which factors predicted realized 3-day returns. Current weights are shown in `weights.json`; run `python3 weight_refitter.py status` to see them. The decorrelation factor is always fixed at 10%; the other five share the remaining 90%.
+
+- Score **> 2.5** → qualifies for trading (threshold auto-tuned by weekly weight refitter)
 - Score **> 2.5** → exceptional — flagged as Strong Signal
 - Score **> 3.0** → very rare, pay close attention
 
