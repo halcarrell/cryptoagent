@@ -421,13 +421,26 @@ def test_unit_functions():
         assert _extract_payload(b"") == {}, "empty body should return {}"
         assert _extract_payload(b"not json at all") == {}, "garbage body should return {}"
 
+    def _news_sentiment_detection():
+        import news_fetcher
+        assert news_fetcher._sentiment("Bitcoin surges to new high") == "bullish"
+        assert news_fetcher._sentiment("ETH crashes after exploit") == "bearish"
+        assert news_fetcher._sentiment("Crypto market update") == "neutral"
+        assert news_fetcher._sentiment("BTC surges but concern grows") == "neutral"  # tie → neutral
+
+    def _coin_names_coverage():
+        import news_fetcher
+        for sym in ("BTC", "ETH", "BNB", "SOL", "LTC", "XLM", "TRX", "KAS", "IMX", "AAVE"):
+            assert sym in news_fetcher._COIN_NAMES, f"_COIN_NAMES missing {sym}"
+
     for fn in [_strip_quote_correctness, _generate_signal_id_format,
                _surprise_ratio_tags, _entry_conditions_insufficient_candles,
                _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
                _decide_trade_rejects_stale_signal, _decide_trade_rejects_wide_stop,
                _binance_us_url_format,
                _extract_payload_pure_json, _extract_payload_pine_mixed_format,
-               _extract_payload_empty_returns_empty_dict]:
+               _extract_payload_empty_returns_empty_dict,
+               _news_sentiment_detection, _coin_names_coverage]:
         test(fn.__name__.lstrip("_"), fn)
 
 

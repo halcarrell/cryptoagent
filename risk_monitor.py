@@ -55,6 +55,8 @@ MDD_PAUSE_THRESHOLD = 12.0  # % weighted drawdown — from architecture doc blue
 # ----- DB -----
 def init_risk_tables():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS risk_rejections (
             rejection_id INTEGER PRIMARY KEY AUTOINCREMENT,
