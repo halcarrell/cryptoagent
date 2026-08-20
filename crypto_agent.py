@@ -714,6 +714,7 @@ def cmd_daily(conn):
         notify_cron_failure("picks empty", "No picks in DB after fetch.")
 
     # Filter to coins actually tradeable on US exchanges for Discord/email
+    tradeable: set = set()
     try:
         from tv_integration import get_tradeable_pairs
         tradeable = get_tradeable_pairs("US_EXCHANGES", "USDT")
@@ -809,16 +810,18 @@ def cmd_daily(conn):
         print(f"[daily] News fetch failed (non-fatal): {e}", flush=True)
 
     # Bottom-5 scored coins from today's full universe — short watch candidates.
-    # Filters out stablecoins and coins not eligible (same as main screener).
+    # Filters out stablecoins, ineligible coins, and non-US-tradeable assets.
     short_watch = []
     try:
         cur.execute("""
             SELECT symbol, composite_score FROM factor_scores
             WHERE pick_date = ? AND composite_score IS NOT NULL
-            ORDER BY composite_score ASC LIMIT 5
+            ORDER BY composite_score ASC LIMIT 20
         """, (today,))
-        short_watch = [{"symbol": r[0], "score": round(r[1], 2)}
-                       for r in cur.fetchall()]
+        all_short = [{"symbol": r[0], "score": round(r[1], 2)} for r in cur.fetchall()]
+        if tradeable:
+            all_short = [s for s in all_short if s["symbol"].upper() in tradeable]
+        short_watch = all_short[:5]
     except Exception as e:
         print(f"[daily] Short watch query failed: {e}", flush=True)
 
