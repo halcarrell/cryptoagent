@@ -358,6 +358,19 @@ def test_unit_functions():
         corr_flat = wr.correlation_with_returns(weights, flat)
         assert corr_flat == 0.0
 
+    def _staking_derivative_exclusion():
+        import crypto_agent
+        weth = {"id": "weth", "name": "WETH", "symbol": "weth",
+                "current_price": 3000, "price_change_percentage_30d_in_currency": 15.0,
+                "market_cap": 5e9, "total_volume": 1e8,
+                "price_change_percentage_24h_in_currency": 2.0,
+                "price_change_percentage_7d_in_currency": 5.0,
+                "atl_change_percentage": 100.0}
+        assert crypto_agent.is_excluded(weth), "WETH should be excluded as staking derivative"
+        reth = {"id": "rocket-pool-eth", "name": "Rocket Pool ETH", "symbol": "reth",
+                "current_price": 3100, "price_change_percentage_30d_in_currency": 15.0}
+        assert crypto_agent.is_excluded(reth), "rETH should be excluded via 'rocket pool' keyword"
+
     def _decide_trade_rejects_stale_signal():
         import ai_trader
         from datetime import datetime, timezone, timedelta
@@ -430,12 +443,14 @@ def test_unit_functions():
 
     def _coin_names_coverage():
         import news_fetcher
-        for sym in ("BTC", "ETH", "BNB", "SOL", "LTC", "XLM", "TRX", "KAS", "IMX", "AAVE"):
+        for sym in ("BTC", "ETH", "BNB", "SOL", "LTC", "XLM", "TRX", "KAS", "IMX", "AAVE",
+                    "SUI", "HYPE", "VIRTUAL", "FET", "OCEAN"):
             assert sym in news_fetcher._COIN_NAMES, f"_COIN_NAMES missing {sym}"
 
     for fn in [_strip_quote_correctness, _generate_signal_id_format,
                _surprise_ratio_tags, _entry_conditions_insufficient_candles,
                _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
+               _staking_derivative_exclusion,
                _decide_trade_rejects_stale_signal, _decide_trade_rejects_wide_stop,
                _binance_us_url_format,
                _extract_payload_pure_json, _extract_payload_pine_mixed_format,

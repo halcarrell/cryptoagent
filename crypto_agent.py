@@ -43,6 +43,9 @@ MIN_DAILY_VOLUME = 5_000_000  # liquidity floor: $5M
 EXCLUDE_KEYWORDS = [
     "usd", "usdt", "usdc", "dai", "busd", "tusd", "fdusd",
     "wrapped", "staked", "liquid staked", "stake",
+    # Liquid staking and wrapped ETH/BTC derivatives — they track the underlying,
+    # not an independent market, so their momentum signals are redundant with BTC/ETH.
+    "weth", "reth", "steth", "cbeth", "sfrxeth", "weeth", "rocket pool",
 ]
 
 # Pump guard: coins that have already moved this much are likely in a

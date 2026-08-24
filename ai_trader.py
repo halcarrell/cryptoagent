@@ -896,7 +896,7 @@ Return shape: {{"action":"enter|pass","side":"long|short","entry":N,"stop":N,"ta
 
     client = anthropic.Anthropic(api_key=anthropic_api_key)
     msg = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}],
     )

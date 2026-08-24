@@ -580,7 +580,7 @@ def admin_set_config():
         conn = sqlite3.connect(db)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS config_overrides
-            (key TEXT PRIMARY KEY, value TEXT)
+            (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT, reason TEXT)
         """)
         updates = {}
         for key in ("min_score", "max_score"):
@@ -619,7 +619,7 @@ def admin_reset_streak():
         conn = sqlite3.connect(db)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS config_overrides
-            (key TEXT PRIMARY KEY, value TEXT)
+            (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT, reason TEXT)
         """)
         now_iso = datetime.now(timezone.utc).isoformat()
         conn.execute(
