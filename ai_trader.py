@@ -86,7 +86,7 @@ def _effective_score_bounds() -> tuple:
     return (ov.get("min_score", MIN_SCORE_TO_TRADE),
             ov.get("max_score", MAX_SCORE_TO_TRADE))
 _SPOT_TAKER_FEE = _CFG.get("exchange", {}).get("spot", {}).get("taker_fee", 0.001)
-_PERP_ENABLED   = _CFG.get("exchange", {}).get("perp", {}).get("enabled", True)
+_PERP_ENABLED   = _CFG.get("exchange", {}).get("perp", {}).get("enabled", False)
 
 # Risk parameters — net R:R accounts for round-trip fees (2 × taker fee)
 MIN_SCORE_TO_TRADE  = _CFG.get("risk", {}).get("min_score", 0.5)

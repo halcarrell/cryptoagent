@@ -393,6 +393,32 @@ def test_unit_functions():
         assert "stop" in d.reasoning.lower() or "exceed" in d.reasoning.lower(), \
             f"unexpected reason: {d.reasoning}"
 
+    def _decide_trade_rejects_dead_zone_score():
+        """Scores between 2.0 and 2.5 (exclusive) for longs are skipped (dead zone).
+        This band historically shows 33% hit rate and -0.72% avg 3d return.
+        The dead zone guard fires only when min_score is set below 2.0 (e.g.
+        via /admin/config or a DB override during an experiment)."""
+        import ai_trader
+        original_ctx   = ai_trader.get_screener_context
+        original_bounds = ai_trader._effective_score_bounds
+        try:
+            ai_trader.get_screener_context = lambda sym, date=None: {
+                "rank": 3, "score": 2.2, "date": "2025-01-15",
+                "decorrelation": 0.0, "momentum_score": 0.5, "reversal_score": 0.1,
+            }
+            # Simulate min_score lowered to 1.0 via /admin/config (dead zone then reachable)
+            ai_trader._effective_score_bounds = lambda: (1.0, None)
+            alert = {"symbol": "SOLUSDT", "exchange": "BINANCE", "side": "long",
+                     "entry": 100, "stop": 94, "target": 115}
+            d = ai_trader.decide_trade(alert)
+            assert d.action == "pass", \
+                f"dead zone score=2.2 should be rejected for longs, got: {d.action}"
+            assert "dead zone" in d.reasoning.lower() or "2.0" in d.reasoning, \
+                f"unexpected reason for dead zone rejection: {d.reasoning}"
+        finally:
+            ai_trader.get_screener_context   = original_ctx
+            ai_trader._effective_score_bounds = original_bounds
+
     def _binance_us_url_format():
         import tv_integration
         assert tv_integration.EXCHANGE_API.get("BINANCE_US") == "https://api.binance.us", \
@@ -452,6 +478,7 @@ def test_unit_functions():
                _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
                _staking_derivative_exclusion,
                _decide_trade_rejects_stale_signal, _decide_trade_rejects_wide_stop,
+               _decide_trade_rejects_dead_zone_score,
                _binance_us_url_format,
                _extract_payload_pure_json, _extract_payload_pine_mixed_format,
                _extract_payload_empty_returns_empty_dict,

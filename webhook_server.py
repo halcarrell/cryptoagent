@@ -149,7 +149,7 @@ def _run_opportunity_scan():
     bar close, this checks all screener picks against live Binance 1H candles
     every 15 minutes during the active window and opens paper trades immediately
     when conditions match — making TradingView optional for entries.
-    Active window: 11:45-18:00 UTC (covers EU open through US session close).
+    Active window: 06:00-23:00 UTC (skips only the quietest dead hours).
     """
     now_utc = datetime.now(timezone.utc)
     if not (6 <= now_utc.hour < 23):
