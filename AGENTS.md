@@ -19,12 +19,14 @@ separate frontend). Python 3.12 and a `venv/` virtualenv are used.
 
 ### Tests
 - `./venv/bin/python test_suite.py` runs the suite offline. Add `--live` to hit the deployed
-  Railway endpoint (needs network + `RAILWAY_URL`/`WEBHOOK_AUTH_TOKEN`).
-- Two assertions currently fail against committed content (`risk_thresholds_sensible` because
-  `config.json` `min_score` is 2.5, and `pine_has_webhook_alert`). These are pre-existing
-  content mismatches, not environment breakage — the test runner and all imports work.
+  Railway endpoint (needs network + `RAILWAY_URL`/`WEBHOOK_AUTH_TOKEN`). Do not hardcode the
+  production auth token in the repo — set it via env for `--live` runs.
+- Offline unit tests should all pass against committed content. Schema/DB freshness tests skip
+  (or fail locally) when `crypto_agent.db` is absent — that is expected in a clean checkout.
 
 ### Notes
 - No linter is configured in this repo.
 - `crypto_agent.db*`, `venv/`, `.env*`, and generated `watchlist_*.txt`/`scores_*.pine` are
   git-ignored — never commit them.
+- Shared score-bucket recommendation logic lives in `score_analysis.py` (used by `/analysis`
+  and Sunday `auto_tune_config`). Dead zones require weak hit rate **and** weak avg 3d return.

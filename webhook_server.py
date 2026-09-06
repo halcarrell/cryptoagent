@@ -161,7 +161,7 @@ def _run_opportunity_scan():
         cur  = conn.cursor()
         today = now_utc.strftime("%Y-%m-%d")
 
-        # Top-10 picks for long + short scanning
+        # Top-10 picks — long scanning only (shorting leaders is structurally wrong)
         cur.execute("SELECT symbol, composite_score, rank FROM picks WHERE pick_date = ? ORDER BY rank", (today,))
         picks = [{"symbol": r[0], "score": r[1], "rank": r[2]} for r in cur.fetchall()]
 
@@ -265,11 +265,11 @@ def _run_opportunity_scan():
                     except Exception as e:
                         print(f"[scanner] Risk check error {sym_pair}: {e}", flush=True)
 
-        # Top-10 picks: scan for both long and short
+        # Top-10 picks: long only — shorts come exclusively from short_watch
         for pick in picks:
-            _scan_coin(pick, ["long", "short"])
+            _scan_coin(pick, ["long"])
 
-        # Short Watch coins: short signals only (these are the market's weakest — BTC, ETH, BNB, etc.)
+        # Short Watch coins: short signals only (market's weakest — BTC, ETH, BNB, etc.)
         regime = ai_trader.btc_regime()
         if regime in ("bear", "sideways"):  # only scan short watch in RISK_OFF/CHOP
             for pick in short_watch:
@@ -698,39 +698,29 @@ def score_analysis():
     if request.args.get("auth") != AUTH_TOKEN:
         return jsonify({"error": "unauthorized"}), 401
     try:
-        db  = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
-        cfg_path = Path(__file__).parent / "config.json"
-        import json as _json
-        risk_cfg    = {}
-        current_min = 1.2
-        current_max = None
-        if cfg_path.exists():
-            with open(cfg_path) as f:
-                risk_cfg    = _json.load(f).get("risk", {})
-                current_min = risk_cfg.get("min_score", 1.2)
-                current_max = risk_cfg.get("max_score", None)
+        import score_analysis as sa
+
+        db = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
+        # Prefer live DB overrides (what trading actually uses) over config.json
+        try:
+            current_min, current_max = ai_trader._effective_score_bounds()
+        except Exception:
+            cfg_path = Path(__file__).parent / "config.json"
+            import json as _json
+            current_min, current_max = 1.2, None
+            if cfg_path.exists():
+                with open(cfg_path) as f:
+                    risk_cfg = _json.load(f).get("risk", {})
+                    current_min = risk_cfg.get("min_score", 1.2)
+                    current_max = risk_cfg.get("max_score", None)
 
         conn = sqlite3.connect(db)
-        cur  = conn.cursor()
+        cur = conn.cursor()
 
-        # Bucket lower bounds used for recommendation logic — these are the
-        # labeled boundaries, not the actual min score seen in each bucket.
-        # (The DB may contain picks scored below 1.0 that leak into the first
-        # bucket; we always compare against the label, not bucket_min.)
-        _BUCKET_LOWER = {"1.0–1.5": 1.0, "1.5–2.0": 1.5, "2.0–2.5": 2.0,
-                         "2.5–3.0": 2.5, "3.0+": 3.0}
-        _BUCKET_ORDER = list(_BUCKET_LOWER.keys())
-
-        # Score-bucketed realized returns
-        cur.execute("""
+        # Score-bucketed realized returns (shared CASE with auto-tune)
+        cur.execute(f"""
             SELECT
-                CASE
-                    WHEN composite_score < 1.5 THEN '1.0–1.5'
-                    WHEN composite_score < 2.0 THEN '1.5–2.0'
-                    WHEN composite_score < 2.5 THEN '2.0–2.5'
-                    WHEN composite_score < 3.0 THEN '2.5–3.0'
-                    ELSE '3.0+'
-                END AS bucket,
+                {sa.sql_bucket_case("composite_score")} AS bucket,
                 COUNT(*)                                                          AS n,
                 ROUND(AVG(realized_1d), 2)                                        AS avg_1d,
                 ROUND(AVG(realized_3d), 2)                                        AS avg_3d,
@@ -742,72 +732,23 @@ def score_analysis():
             ORDER BY MIN(composite_score)
         """)
         cols = [d[0] for d in cur.description]
-        buckets = [dict(zip(cols, r)) for r in cur.fetchall()]
+        raw_buckets = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # Present labeled buckets with en-dash for readability; keep <1.0 raw
+        buckets = []
+        for b in raw_buckets:
+            out = dict(b)
+            if b["bucket"] != "<1.0":
+                out["bucket"] = sa.display_bucket(b["bucket"])
+            buckets.append(out)
 
-        # ── Recommendation engine ─────────────────────────────────────────────
-        # Uses labeled bucket boundaries (not actual min scores, which can be
-        # noisy on small datasets). Requires n >= 5 per bucket for confidence.
-        bucket_map = {b["bucket"]: b for b in buckets}
-        notes = []
-
-        # 1. Find dead zones: buckets with positive avg_3d neighbors but weak
-        #    themselves (hit_rate < 40% and avg_3d < 2%). Flag them as warnings.
-        for bk in _BUCKET_ORDER:
-            b = bucket_map.get(bk)
-            if b and b["n"] >= 10 and (b.get("hit_rate_3d") or 0) < 40:
-                notes.append(f"⚠ {bk} is a dead zone — only {b['hit_rate_3d']:.0f}% "
-                              f"hit rate on {b['n']} picks. Avoid.")
-
-        # 2. Detect non-monotonic tail: last bucket(s) with negative avg_3d and n>=3
-        suggested_max = current_max
-        for bk in reversed(_BUCKET_ORDER):
-            b = bucket_map.get(bk)
-            if b and b["n"] >= 3 and (b.get("avg_3d") or 0) < 0:
-                suggested_max = _BUCKET_LOWER[bk]
-            else:
-                break  # stop at first non-negative from the top
-
-        # 3. Find minimum score: walk DOWN from the top bucket, extending the
-        #    "good" range while avg_3d > 1% AND hit_rate >= 40% AND n >= 5.
-        #    Stops at the first dead zone. Picking the first ascending bucket
-        #    with positive avg_3d (old logic) could recommend a min_score that
-        #    reopens a dead zone flagged in step 1 above — contiguous-from-top
-        #    avoids that contradiction.
-        suggested_min = current_min
-        _contig = []
-        for bk in reversed(_BUCKET_ORDER):
-            b = bucket_map.get(bk)
-            if b and b["n"] >= 5 and (b.get("avg_3d") or 0) > 1.0 and (b.get("hit_rate_3d") or 0) >= 40:
-                _contig.append(bk)
-            else:
-                break
-        if _contig:
-            suggested_min = _BUCKET_LOWER[_contig[-1]]
-
-        # Build summary message
-        changes = []
-        if suggested_min != current_min:
-            direction = "Raise" if suggested_min > current_min else "Lower"
-            changes.append(f"{direction} min_score {current_min} → {suggested_min}")
-        if suggested_max != current_max:
-            if suggested_max:
-                changes.append(f"Set max_score cap at {suggested_max} "
-                                f"(scores above this average negative returns)")
-            else:
-                changes.append("Remove max_score cap — high-score picks performing well")
-
-        if not buckets or sum(b["n"] for b in buckets) < 20:
-            msg = "Not enough data yet — check back after 30+ days of picks."
-        elif changes:
-            msg = " | ".join(changes) + "."
-            if notes:
-                msg += " Also: " + "; ".join(notes)
-        elif notes:
-            msg = " ".join(notes)
-        else:
-            msg = (f"Config looks well-calibrated — "
-                   f"min_score={current_min}"
-                   + (f", max_score={current_max}" if current_max else "") + ".")
+        suggested_min, suggested_max, notes = sa.recommend_score_bounds(
+            raw_buckets, current_min, current_max,
+            min_n_good=5, min_avg_good=1.0,
+        )
+        msg = sa.format_recommendation(
+            raw_buckets, current_min, current_max,
+            suggested_min, suggested_max, notes,
+        )
 
         # Paper trade outcome breakdown
         cur.execute("""
@@ -830,6 +771,8 @@ def score_analysis():
         return jsonify({
             "current_min_score": current_min,
             "current_max_score": current_max,
+            "suggested_min_score": suggested_min,
+            "suggested_max_score": suggested_max,
             "btc_regime":        regime,
             "recommendation":    msg,
             "score_buckets":     buckets,
