@@ -100,6 +100,13 @@ def _load_weights() -> dict:
 WEIGHTS = _load_weights()
 
 
+def reload_weights() -> dict:
+    """Re-read weights.json so Sunday refits apply without process restart."""
+    global WEIGHTS
+    WEIGHTS = _load_weights()
+    return WEIGHTS
+
+
 # ---------- Database ----------
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -383,6 +390,7 @@ def compute_signals(coins, btc_change_7d, correlations=None):
 
 # ---------- Commands ----------
 def cmd_fetch(conn):
+    reload_weights()  # pick up Sunday refit without requiring a redeploy
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     print(f"[{today}] Fetching universe of top {TOP_N_UNIVERSE}...")
     coins = fetch_top_coins(TOP_N_UNIVERSE)

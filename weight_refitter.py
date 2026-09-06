@@ -32,7 +32,8 @@ DB_PATH      = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 WEIGHTS_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db")).parent / "weights.json"
 
 FACTORS = ["momentum", "volume", "volatility", "reversal", "rel_strength", "decorrelation"]
-CURRENT_WEIGHTS = {
+
+_DEFAULT_WEIGHTS = {
     "momentum":      0.32,
     "volume":        0.18,
     "volatility":    0.14,
@@ -40,6 +41,32 @@ CURRENT_WEIGHTS = {
     "rel_strength":  0.12,
     "decorrelation": 0.10,
 }
+
+
+def _load_current_weights() -> dict:
+    """Load prior weights from weights.json so each refit smooths from live values."""
+    try:
+        if not WEIGHTS_PATH.exists():
+            return dict(_DEFAULT_WEIGHTS)
+        data = json.loads(WEIGHTS_PATH.read_text())
+        w = dict(data.get("weights", {}))
+        if not w:
+            return dict(_DEFAULT_WEIGHTS)
+        if "decorrelation" not in w:
+            scale = 0.90 / max(sum(w.values()), 1e-9)
+            w = {k: v * scale for k, v in w.items()}
+            w["decorrelation"] = 0.10
+        if not set(_DEFAULT_WEIGHTS.keys()).issubset(w.keys()):
+            return dict(_DEFAULT_WEIGHTS)
+        if abs(sum(w.values()) - 1.0) > 0.05:
+            return dict(_DEFAULT_WEIGHTS)
+        return w
+    except Exception as e:
+        print(f"[weights] Could not load {WEIGHTS_PATH} ({e}) — using defaults", flush=True)
+        return dict(_DEFAULT_WEIGHTS)
+
+
+CURRENT_WEIGHTS = _load_current_weights()
 
 MIN_OBS_FOR_REFIT = 100   # below this, refusing to fit
 FORWARD_DAYS      = 3     # holding period for "realized return"
@@ -262,6 +289,9 @@ def walk_forward_validate():
 
 # ----- Refit & write -----
 def refit_and_write():
+    global CURRENT_WEIGHTS
+    CURRENT_WEIGHTS = _load_current_weights()
+
     end   = datetime.now(timezone.utc).date()
     start = end - timedelta(days=WALK_TRAIN_DAYS)
     data  = build_dataset(start.isoformat(), end.isoformat())
@@ -327,12 +357,14 @@ def auto_tune_config():
     """Analyze live score-bucket data and auto-adjust min_score / max_score in
     the config_overrides DB table.  Called automatically after every refit.
 
-    Rules:
-    - min_score = lowest labeled bucket with avg_3d > 0 AND n >= 10
+    Rules (shared with /analysis via score_analysis.py):
+    - min_score = lowest contiguous-from-top good bucket (avg_3d primary)
     - max_score = highest labeled bucket floor where avg_3d < 0 AND n >= 5
     - Changes are not applied unless difference >= 0.1 vs current effective value
     - Posts a Discord notification summarising any changes
     """
+    import score_analysis as sa
+
     conn = sqlite3.connect(DB_PATH)
     cur  = conn.cursor()
 
@@ -347,16 +379,10 @@ def auto_tune_config():
     """)
     conn.commit()
 
-    # Score-bucket analysis (same logic as /analysis endpoint)
-    cur.execute("""
+    # Score-bucket analysis (same CASE / rules as /analysis)
+    cur.execute(f"""
         SELECT
-            CASE
-                WHEN composite_score < 1.5 THEN '1.0-1.5'
-                WHEN composite_score < 2.0 THEN '1.5-2.0'
-                WHEN composite_score < 2.5 THEN '2.0-2.5'
-                WHEN composite_score < 3.0 THEN '2.5-3.0'
-                ELSE '3.0+'
-            END AS bucket,
+            {sa.sql_bucket_case("composite_score")} AS bucket,
             COUNT(*),
             AVG(realized_3d),
             100.0 * SUM(CASE WHEN realized_3d > 0 THEN 1.0 ELSE 0 END) / MAX(COUNT(realized_3d), 1)
@@ -365,17 +391,14 @@ def auto_tune_config():
         GROUP BY bucket
         ORDER BY MIN(composite_score)
     """)
-    buckets = [{"bucket": r[0], "n": r[1], "avg_3d": r[2], "hit_rate": r[3]} for r in cur.fetchall()]
+    buckets = [{"bucket": r[0], "n": r[1], "avg_3d": r[2], "hit_rate": r[3]}
+               for r in cur.fetchall()]
     total_n = sum(b["n"] for b in buckets)
 
     if total_n < 20:
         print("[auto-tune] Not enough pick history yet — skipping.", flush=True)
         conn.close()
         return
-
-    BOUNDS = {"1.0-1.5": 1.0, "1.5-2.0": 1.5, "2.0-2.5": 2.0, "2.5-3.0": 2.5, "3.0+": 3.0}
-    ORDER  = list(BOUNDS.keys())
-    bmap   = {b["bucket"]: b for b in buckets}
 
     # Read current effective values
     cur.execute("SELECT key, value FROM config_overrides WHERE key IN ('min_score','max_score')")
@@ -385,35 +408,10 @@ def auto_tune_config():
     eff_min = db_vals.get("min_score", cfg_risk.get("min_score", 1.2))
     eff_max = db_vals.get("max_score", cfg_risk.get("max_score", None))
 
-    # Recommended min: walk DOWN from the top bucket, extending the "good" range
-    # while buckets stay profitable (avg_3d > 0, hit_rate >= 40%, n >= 10). Stops
-    # at the first dead zone — this prevents picking an isolated positive-avg
-    # bucket with a poor hit rate that happens to sit below a dead zone (e.g.
-    # 1.5-2.0 at +5.3% avg but only 35% hit rate, sandwiched by losing buckets
-    # on both sides). Picking the first ascending positive bucket (old logic)
-    # would reopen the exact dead zone the bucket data warns against.
-    def _is_good(b):
-        return bool(b) and b["n"] >= 10 and (b.get("avg_3d") or 0) > 0 and (b.get("hit_rate") or 0) >= 40
-
-    new_min = eff_min
-    contiguous_good = []
-    for bk in reversed(ORDER):
-        b = bmap.get(bk)
-        if _is_good(b):
-            contiguous_good.append(bk)
-        else:
-            break
-    if contiguous_good:
-        new_min = BOUNDS[contiguous_good[-1]]
-
-    # Recommended max: cap below the highest-scoring bucket with negative avg_3d.
-    # Walk top-down; take the first (highest) negative bucket and stop.
-    new_max = eff_max
-    for bk in reversed(ORDER):
-        b = bmap.get(bk)
-        if b and b["n"] >= 5 and (b.get("avg_3d") or 0) < 0:
-            new_max = BOUNDS[bk]
-            break
+    new_min, new_max, _notes = sa.recommend_score_bounds(
+        buckets, eff_min, eff_max,
+        min_n_good=10, min_avg_good=0.0,
+    )
 
     now_iso = datetime.now(timezone.utc).isoformat()
     changes = []

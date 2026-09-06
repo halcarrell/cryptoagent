@@ -55,8 +55,8 @@ s_session_ok  = not use_short_session or (session_hour >= 12 and session_hour < 
 
 // ===== Webhook =====
 g_alert    = "Alert / Webhook"
-auth_token = input.string("d0338ca4f3cc6be20b233142dfd1317277fbca1ec6425cc1076e9365bc803cd3", "Webhook auth token", group=g_alert,
-     tooltip="Copy WEBHOOK_AUTH_TOKEN from Railway → your service → Variables")
+auth_token = input.string("CHANGE_ME", "Webhook auth token", group=g_alert,
+     tooltip="Copy WEBHOOK_AUTH_TOKEN from Railway → your service → Variables. Never commit the real token.")
 
 // ===== Indicators =====
 rsi_v   = ta.rsi(close, 14)

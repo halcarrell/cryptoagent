@@ -277,11 +277,23 @@ def get_screener_context(symbol_base: str, date=None):
                 "momentum_score": round(row[3] or 0.0, 3),
                 "reversal_score": round(row[4] or 0.0, 3)}
 
-    # Not in top picks — check full universe (factor_scores) for short-watch candidates
+    # Not in top picks — only intentional short-watch (bottom-5 by score) is
+    # tradeable. Mid-universe coins must NOT get is_short_watch=True (that used
+    # to bypass min_score for every non-top-10 symbol and also let longs on
+    # non-picks skip the "not in top 10" reject).
     try:
         cur.execute(
-            "SELECT composite_score FROM factor_scores WHERE pick_date = ? AND symbol = ?",
-            (date, symbol_base.upper())
+            """
+            SELECT composite_score FROM factor_scores
+            WHERE pick_date = ? AND symbol = ?
+              AND symbol IN (
+                  SELECT symbol FROM factor_scores
+                  WHERE pick_date = ?
+                  ORDER BY composite_score ASC
+                  LIMIT 5
+              )
+            """,
+            (date, symbol_base.upper(), date),
         )
         row2 = cur.fetchone()
     except Exception:
@@ -382,11 +394,13 @@ def fetch_binance_ohlcv(symbol: str, since_ts: datetime, interval: str = "4h") -
 # ---------- Entry condition computation ----------
 
 def compute_entry_conditions(candles: list) -> dict:
-    """Compute Pine Script-equivalent entry conditions from Binance candle data.
+    """Compute Pine-aligned entry conditions from Binance candle data.
 
-    Mirrors screener_confirmation.pine exactly so server-side scans and
-    TradingView alerts use the same logic. Requires ≥ 50 candles with
-    open/high/low/close/volume fields (use fetch_binance_ohlcv).
+    Long filters match screener_confirmation.pine. Short overbought thresholds
+    are intentionally slightly relaxed vs Pine defaults (RSI>55 / VWAP*1.005 /
+    vol 1.2×) because the strict Pine combo fires <2% of the time on 1H bars;
+    the EMA50-reject path still mirrors Pine. RSI/ATR use Wilder RMA like
+    ta.rsi / ta.atr. Requires ≥ 50 candles with open/high/low/close/volume.
 
     Returns a dict with:
       long_ok  — True when all long conditions pass
@@ -419,17 +433,30 @@ def compute_entry_conditions(candles: list) -> dict:
     vol_avg = sum(volumes[-20:]) / 20
     vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 0
 
-    # ATR(14)
+    # ATR(14) — Wilder RMA (matches Pine ta.atr)
     trs = [max(highs[i] - lows[i],
                abs(highs[i] - closes[i - 1]),
                abs(lows[i]  - closes[i - 1]))
            for i in range(1, len(candles))]
-    atr = sum(trs[-14:]) / 14
+    if len(trs) < 14:
+        atr = sum(trs) / max(len(trs), 1)
+    else:
+        atr = sum(trs[:14]) / 14
+        for tr in trs[14:]:
+            atr = (atr * 13 + tr) / 14
 
-    # RSI(14)
+    # RSI(14) — Wilder RMA (matches Pine ta.rsi)
     gains  = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
     losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
-    ag, al = sum(gains[-14:]) / 14, sum(losses[-14:]) / 14
+    if len(gains) < 14:
+        ag = sum(gains) / max(len(gains), 1)
+        al = sum(losses) / max(len(losses), 1)
+    else:
+        ag = sum(gains[:14]) / 14
+        al = sum(losses[:14]) / 14
+        for g, l in zip(gains[14:], losses[14:]):
+            ag = (ag * 13 + g) / 14
+            al = (al * 13 + l) / 14
     rsi = 100 - 100 / (1 + ag / al) if al > 0 else 100.0
 
     last_close, last_open = closes[-1], opens[-1]
@@ -441,13 +468,12 @@ def compute_entry_conditions(candles: list) -> dict:
     green_ok = last_close > last_open
     long_ok  = trend_ok and vwap_ok and vol_ok and green_ok
 
-    # Short conditions. RSI>55, vol 1.2× (relaxed from 60/1.5 — the original
-    # combination of RSI>60 + above VWAP + red bar on same 1H candle was <2%
-    # frequency even in bear markets, making the scanner nearly unreachable).
+    # Short conditions. Overbought path slightly relaxed vs Pine defaults
+    # (RSI>60 / VWAP*1.01 / vol 1.5×) — see docstring.
     s_trend_ok = e50 <= e200
     s_rsi_ok   = rsi > 55
-    s_vwap_ok  = last_close > vwma * 1.005   # within 0.5% above VWAP (was 1%)
-    s_vol_ok   = vol_ratio >= 1.2             # distribution volume (was 1.5×)
+    s_vwap_ok  = last_close > vwma * 1.005   # within 0.5% above VWAP (Pine default 1%)
+    s_vol_ok   = vol_ratio >= 1.2             # distribution volume (Pine default 1.5×)
     red_ok     = last_close < last_open
 
     # Failed EMA50 bounce: highest high in last 5 bars touched EMA50 zone, now closed below
@@ -1168,7 +1194,15 @@ def evaluate_open_trades_live():
 
         if status and not too_young:
             time_in_h = (now - opened_at).total_seconds() / 3600.0
-            pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry - exit_p) / entry * 100
+            final_pnl = (exit_p / entry - 1) * 100 if side == "long" else (entry - exit_p) / entry * 100
+            # After T1 (50% @ 2R), remaining 50% may stop at breakeven or hit
+            # full target — blend so Discord/stats don't discard T1 profit.
+            if t1_closed and t1_p:
+                t1_pnl = ((t1_p / entry - 1) * 100 if side == "long"
+                          else (entry - t1_p) / entry * 100)
+                pnl = 0.5 * t1_pnl + 0.5 * final_pnl
+            else:
+                pnl = final_pnl
             surprise, tag = _surprise_ratio(
                 pnl, entry, orig_stop, tgt_p, t.get("confidence", 0.5), side
             )

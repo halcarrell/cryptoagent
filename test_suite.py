@@ -29,10 +29,8 @@ LIVE_BASE = os.environ.get(
     "RAILWAY_URL",
     "https://charming-possibility-production-c019.up.railway.app"
 )
-WEBHOOK_TOKEN = os.environ.get(
-    "WEBHOOK_AUTH_TOKEN",
-    "d0338ca4f3cc6be20b233142dfd1317277fbca1ec6425cc1076e9365bc803cd3"
-)
+# Never hardcode the production token — set WEBHOOK_AUTH_TOKEN in the environment.
+WEBHOOK_TOKEN = os.environ.get("WEBHOOK_AUTH_TOKEN", "CHANGE_ME")
 DB_PATH = Path(os.environ.get("CRYPTO_AGENT_DB", "crypto_agent.db"))
 
 PASS = "✅"
@@ -113,6 +111,17 @@ def test_db_schema():
         print(f"  {WARN} DB not found at {DB_PATH} — skipping schema tests")
         return
 
+    # A partial DB (e.g. created by importing webhook_server without a fetch)
+    # only has trading tables — skip rather than fail the offline suite.
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = {r[0] for r in cur.fetchall()}
+    conn.close()
+    if "picks" not in tables:
+        print(f"  {WARN} screener tables absent in {DB_PATH} — skipping schema tests")
+        return
+
     def _required_tables():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -188,6 +197,9 @@ def test_live(run_live: bool):
     print("\n[4] Live endpoint tests")
     if not run_live:
         print(f"  (skipped — run with --live to test Railway endpoint)")
+        return
+    if WEBHOOK_TOKEN in ("", "CHANGE_ME"):
+        print(f"  {WARN} WEBHOOK_AUTH_TOKEN unset — skipping authenticated live tests")
         return
 
     def _health():
@@ -473,6 +485,55 @@ def test_unit_functions():
                     "SUI", "HYPE", "VIRTUAL", "FET", "OCEAN"):
             assert sym in news_fetcher._COIN_NAMES, f"_COIN_NAMES missing {sym}"
 
+    def _score_analysis_dead_zone_requires_weak_avg():
+        """High-avg / low-hit buckets must NOT be labeled dead zones."""
+        import score_analysis as sa
+        strong = {"bucket": "2.5-3.0", "n": 30, "avg_3d": 7.83, "hit_rate_3d": 33.3}
+        weak = {"bucket": "2.0-2.5", "n": 55, "avg_3d": -1.96, "hit_rate_3d": 30.9}
+        assert not sa.is_dead_zone(strong), "profitable high-avg band flagged as dead zone"
+        assert sa.is_dead_zone(weak), "losing band should be a dead zone"
+        suggested_min, _, notes = sa.recommend_score_bounds(
+            [
+                {"bucket": "1.0-1.5", "n": 100, "avg_3d": 0.3, "hit_rate_3d": 45},
+                {"bucket": "1.5-2.0", "n": 50, "avg_3d": -0.5, "hit_rate_3d": 35},
+                {"bucket": "2.0-2.5", "n": 40, "avg_3d": -2.0, "hit_rate_3d": 31},
+                strong,
+                {"bucket": "3.0+", "n": 16, "avg_3d": 2.88, "hit_rate_3d": 37.5},
+            ],
+            current_min=2.5,
+            current_max=3.0,
+            min_n_good=5,
+            min_avg_good=1.0,
+        )
+        assert suggested_min == 2.5, f"expected min_score 2.5 from contig top, got {suggested_min}"
+        assert any("2.0" in n for n in notes), f"expected 2.0–2.5 dead-zone note, got {notes}"
+        assert not any("2.5–3.0" in n or "2.5-3.0" in n for n in notes), \
+            f"2.5–3.0 must not be flagged dead zone: {notes}"
+        assert not sa.is_dead_zone(strong)
+
+    def _score_analysis_sub_one_bucket():
+        import score_analysis as sa
+        assert sa.bucket_for_score(0.5) == "<1.0"
+        assert sa.bucket_for_score(1.2) == "1.0-1.5"
+        assert "<1.0" in sa.sql_bucket_case()
+
+    def _weight_refitter_loads_weights_json():
+        import weight_refitter
+        w = weight_refitter._load_current_weights()
+        assert abs(sum(w.values()) - 1.0) < 0.05
+        # Must come from weights.json (volume ~0.30 after decorrelation injection),
+        # not the stale hardcoded prior (volume 0.18).
+        assert abs(w["volume"] - 0.299) < 0.02, f"expected weights.json volume, got {w}"
+        assert abs(w["volume"] - 0.18) > 0.05, "still using hardcoded prior volume=0.18"
+
+    def _blended_t1_pnl_math():
+        """After T1 @ +2R then BE stop on remainder, blended PnL is +R not 0."""
+        entry, t1, exit_p = 100.0, 104.0, 100.0  # 2R = 4% when stop was 2% away
+        t1_pnl = (t1 / entry - 1) * 100
+        final_pnl = (exit_p / entry - 1) * 100
+        blended = 0.5 * t1_pnl + 0.5 * final_pnl
+        assert abs(blended - 2.0) < 1e-9, f"expected +2% blended, got {blended}"
+
     for fn in [_strip_quote_correctness, _generate_signal_id_format,
                _surprise_ratio_tags, _entry_conditions_insufficient_candles,
                _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
@@ -482,7 +543,11 @@ def test_unit_functions():
                _binance_us_url_format,
                _extract_payload_pure_json, _extract_payload_pine_mixed_format,
                _extract_payload_empty_returns_empty_dict,
-               _news_sentiment_detection, _coin_names_coverage]:
+               _news_sentiment_detection, _coin_names_coverage,
+               _score_analysis_dead_zone_requires_weak_avg,
+               _score_analysis_sub_one_bucket,
+               _weight_refitter_loads_weights_json,
+               _blended_t1_pnl_math]:
         test(fn.__name__.lstrip("_"), fn)
 
 
