@@ -583,11 +583,12 @@ def admin_set_config():
             (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT, reason TEXT)
         """)
         updates = {}
+        now_iso = datetime.now(timezone.utc).isoformat()
         for key in ("min_score", "max_score"):
             if key in data:
                 conn.execute(
-                    "INSERT OR REPLACE INTO config_overrides (key, value) VALUES (?, ?)",
-                    (key, str(data[key]))
+                    "INSERT OR REPLACE INTO config_overrides (key, value, updated_at) VALUES (?, ?, ?)",
+                    (key, str(data[key]), now_iso)
                 )
                 updates[key] = data[key]
         conn.commit()
