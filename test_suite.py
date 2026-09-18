@@ -485,6 +485,24 @@ def test_unit_functions():
                     "SUI", "HYPE", "VIRTUAL", "FET", "OCEAN"):
             assert sym in news_fetcher._COIN_NAMES, f"_COIN_NAMES missing {sym}"
 
+    def _coin_names_no_duplicate_keys():
+        # Parse source file directly to catch duplicate dict keys that Python silently overwrites.
+        import ast, pathlib
+        src = pathlib.Path("news_fetcher.py").read_text()
+        tree = ast.parse(src)
+        seen: dict = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                for k in node.keys:
+                    if isinstance(k, ast.Constant):
+                        key = k.value
+                        assert key not in seen, (
+                            f"Duplicate key '{key}' in _COIN_NAMES dict "
+                            f"(first at line {seen[key]}, duplicate at line {k.lineno})"
+                        )
+                        seen[key] = k.lineno
+                break  # only check the first (top-level) dict, which is _COIN_NAMES
+
     def _score_analysis_dead_zone_requires_weak_avg():
         """High-avg / low-hit buckets must NOT be labeled dead zones."""
         import score_analysis as sa
@@ -549,6 +567,7 @@ def test_unit_functions():
                _extract_payload_pure_json, _extract_payload_pine_mixed_format,
                _extract_payload_empty_returns_empty_dict,
                _news_sentiment_detection, _coin_names_coverage,
+               _coin_names_no_duplicate_keys,
                _score_analysis_dead_zone_requires_weak_avg,
                _score_analysis_sub_one_bucket,
                _weight_refitter_loads_weights_json,

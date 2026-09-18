@@ -117,7 +117,6 @@ _COIN_NAMES: dict = {
     "GOAT":  ["goatseus maximus"],
     "WEN":   ["wen token"],
     "MOTHER":["iggy azalea", "mother iggy"],
-    "POL":   ["polygon"],
     "ZEN":   ["horizen"],
     "CFX":   ["conflux"],
     "ROSE":  ["oasis network"],
@@ -150,13 +149,9 @@ _COIN_NAMES: dict = {
     "SAFE":  ["safe protocol"],
     "BB":    ["bouncbit"],
     "IO":    ["io.net", "ionet"],
-    "ZK":    ["zksync", "zk sync"],
     "LISTA": ["lista dao"],
-    "GALA":  ["gala games"],
     "RENDER":["render token", "render network"],
-    "AKT":   ["akash"],
     "ACH":   ["alchemy pay"],
-    "NEAR":  ["near protocol"],
 }
 
 _BULLISH_RE = re.compile(
