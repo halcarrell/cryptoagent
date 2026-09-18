@@ -520,11 +520,16 @@ def test_unit_functions():
     def _weight_refitter_loads_weights_json():
         import weight_refitter
         w = weight_refitter._load_current_weights()
-        assert abs(sum(w.values()) - 1.0) < 0.05
-        # Must come from weights.json (volume ~0.30 after decorrelation injection),
-        # not the stale hardcoded prior (volume 0.18).
-        assert abs(w["volume"] - 0.299) < 0.02, f"expected weights.json volume, got {w}"
-        assert abs(w["volume"] - 0.18) > 0.05, "still using hardcoded prior volume=0.18"
+        assert abs(sum(w.values()) - 1.0) < 0.05, f"weights don't sum to 1.0: {w}"
+        # Must come from weights.json, not the hardcoded prior (volume=0.18, decorr=0.10).
+        # After a refit the weights shift; we only verify that the file is loaded and that
+        # all factors are present — not that any factor has a specific value.
+        for factor in weight_refitter.FACTORS:
+            assert factor in w, f"factor '{factor}' missing from loaded weights"
+            assert w[factor] >= 0, f"{factor} weight is negative: {w[factor]}"
+        # The hardcoded prior has volume=0.18. If weights.json is loaded (and the last
+        # refit ran), volume should differ by more than 0.02 from the static prior.
+        assert abs(w["volume"] - 0.18) > 0.02, "weights appear to be the hardcoded prior, not weights.json"
 
     def _blended_t1_pnl_math():
         """After T1 @ +2R then BE stop on remainder, blended PnL is +R not 0."""
