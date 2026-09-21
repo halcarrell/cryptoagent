@@ -557,6 +557,35 @@ def test_unit_functions():
         blended = 0.5 * t1_pnl + 0.5 * final_pnl
         assert abs(blended - 2.0) < 1e-9, f"expected +2% blended, got {blended}"
 
+    def _btc_regime_detail_output_format():
+        """btc_regime_detail() returns (v2_regime, reason_str) with correct mapping.
+
+        Injects a known state into _btc_regime_cache to avoid a Binance network call.
+        Validates the RISK_ON/RISK_OFF/CHOP mapping and that the reason string is
+        informative — this function is called on every webhook so regressions matter.
+        """
+        import ai_trader
+        import time as _t
+        original_cache = ai_trader._btc_regime_cache
+        try:
+            # Bull: EMA50 > EMA200 by >2%
+            ai_trader._btc_regime_cache = (_t.monotonic(), "bull", 5.2, 52000.0, 49000.0, 66000.0)
+            regime, reason = ai_trader.btc_regime_detail()
+            assert regime == "RISK_ON", f"bull should map to RISK_ON, got {regime}"
+            assert "EMA50 above" in reason, f"reason missing EMA50 above: {reason}"
+            assert "gap" in reason.lower() and "%" in reason, f"reason should include gap%: {reason}"
+            # Sideways: EMAs within 2%
+            ai_trader._btc_regime_cache = (_t.monotonic(), "sideways", 0.8, 50500.0, 50000.0, 60000.0)
+            regime2, reason2 = ai_trader.btc_regime_detail()
+            assert regime2 == "CHOP", f"sideways should map to CHOP, got {regime2}"
+            # Bear: EMA200 > EMA50 by >2%
+            ai_trader._btc_regime_cache = (_t.monotonic(), "bear", -4.1, 46000.0, 48000.0, 50000.0)
+            regime3, reason3 = ai_trader.btc_regime_detail()
+            assert regime3 == "RISK_OFF", f"bear should map to RISK_OFF, got {regime3}"
+            assert "EMA50 below" in reason3, f"reason missing EMA50 below: {reason3}"
+        finally:
+            ai_trader._btc_regime_cache = original_cache
+
     for fn in [_strip_quote_correctness, _generate_signal_id_format,
                _surprise_ratio_tags, _entry_conditions_insufficient_candles,
                _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
@@ -571,7 +600,8 @@ def test_unit_functions():
                _score_analysis_dead_zone_requires_weak_avg,
                _score_analysis_sub_one_bucket,
                _weight_refitter_loads_weights_json,
-               _blended_t1_pnl_math]:
+               _blended_t1_pnl_math,
+               _btc_regime_detail_output_format]:
         test(fn.__name__.lstrip("_"), fn)
 
 
