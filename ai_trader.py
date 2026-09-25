@@ -1115,6 +1115,8 @@ def evaluate_open_trades_live():
             if opened_at.tzinfo is None:
                 opened_at = opened_at.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
+            print(f"[live-eval] Skipping trade #{t.get('trade_id')} {t.get('symbol')}: "
+                  f"bad opened_at={t['opened_at']!r}", flush=True)
             continue
 
         # Guard full exits only — tranche1 partial close and trailing stop updates
