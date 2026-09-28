@@ -152,6 +152,12 @@ _COIN_NAMES: dict = {
     "LISTA": ["lista dao"],
     "RENDER":["render token", "render network"],
     "ACH":   ["alchemy pay"],
+    "PENDLE":["pendle finance"],
+    "BRETT": ["brett"],
+    "AERO":  ["aerodrome finance", "aerodrome"],
+    "ZETA":  ["zetachain"],
+    "MOODENG":["moodeng"],
+    "NEIRO": ["neiro"],
 }
 
 _BULLISH_RE = re.compile(

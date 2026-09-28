@@ -649,9 +649,42 @@ def test_risk_monitor():
         assert risk_monitor.CB_LOSS_THRESHOLD < 0, \
             f"CB_LOSS_THRESHOLD should be negative: {risk_monitor.CB_LOSS_THRESHOLD}"
 
+    def _strategy_mdd_math():
+        """Verify MDD circuit-breaker math with a known 3-trade equity curve."""
+        import sqlite3, tempfile, os
+        from pathlib import Path
+        import risk_monitor
+        orig = risk_monitor.DB_PATH
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            risk_monitor.DB_PATH = Path(tmp.name)
+            conn = sqlite3.connect(tmp.name)
+            conn.execute("""CREATE TABLE paper_trades
+                (trade_id INTEGER PRIMARY KEY, pnl_pct REAL, size_pct REAL,
+                 status TEXT, closed_at TEXT)""")
+            # +5% on 4% → equity +0.20, peak=0.20
+            # -10% on 4% → equity -0.20, dd=0.40
+            # -8%  on 4% → equity -0.52, dd=0.72 (max)
+            conn.executemany(
+                "INSERT INTO paper_trades VALUES (?,?,?,'stopped','2026-01-01')",
+                [(1, 5.0, 4.0), (2, -10.0, 4.0), (3, -8.0, 4.0)],
+            )
+            conn.commit(); conn.close()
+            mdd = risk_monitor.get_strategy_mdd()
+            assert abs(mdd - 0.72) < 0.01, f"expected MDD 0.72, got {mdd}"
+            # Empty table must return 0.0
+            conn2 = sqlite3.connect(tmp.name)
+            conn2.execute("DELETE FROM paper_trades")
+            conn2.commit(); conn2.close()
+            assert risk_monitor.get_strategy_mdd() == 0.0, "empty trades → MDD must be 0.0"
+        finally:
+            risk_monitor.DB_PATH = orig
+            os.unlink(tmp.name)
+
     for fn in [_strip_quote_matches_ai_trader, _correlation_too_few_samples,
                _correlation_perfect_positive, _correlation_perfect_negative,
-               _risk_constants_sensible]:
+               _risk_constants_sensible, _strategy_mdd_math]:
         test(fn.__name__.lstrip("_"), fn)
 
 
