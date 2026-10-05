@@ -649,9 +649,37 @@ def test_risk_monitor():
         assert risk_monitor.CB_LOSS_THRESHOLD < 0, \
             f"CB_LOSS_THRESHOLD should be negative: {risk_monitor.CB_LOSS_THRESHOLD}"
 
+    def _risk_tables_schema():
+        """init_risk_tables() creates risk_rejections and shadow_trades with required columns."""
+        import sqlite3, tempfile, os, risk_monitor
+        tmp = tempfile.mktemp(suffix=".db")
+        try:
+            orig = risk_monitor.DB_PATH
+            risk_monitor.DB_PATH = __import__("pathlib").Path(tmp)
+            conn = risk_monitor.init_risk_tables()
+            cur  = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {r[0] for r in cur.fetchall()}
+            assert "risk_rejections" in tables, "risk_rejections table missing"
+            assert "shadow_trades"   in tables, "shadow_trades table missing"
+            cur.execute("PRAGMA table_info(risk_rejections)")
+            rr_cols = {r[1] for r in cur.fetchall()}
+            for col in ("rejection_id", "timestamp", "alert_id", "symbol", "reason"):
+                assert col in rr_cols, f"risk_rejections missing column: {col}"
+            cur.execute("PRAGMA table_info(shadow_trades)")
+            st_cols = {r[1] for r in cur.fetchall()}
+            for col in ("shadow_id", "rejection_id", "symbol", "side", "entry_price",
+                        "stop_price", "target_price", "status", "pnl_pct"):
+                assert col in st_cols, f"shadow_trades missing column: {col}"
+            conn.close()
+        finally:
+            risk_monitor.DB_PATH = orig
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
     for fn in [_strip_quote_matches_ai_trader, _correlation_too_few_samples,
                _correlation_perfect_positive, _correlation_perfect_negative,
-               _risk_constants_sensible]:
+               _risk_constants_sensible, _risk_tables_schema]:
         test(fn.__name__.lstrip("_"), fn)
 
 

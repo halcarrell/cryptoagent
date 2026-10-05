@@ -171,6 +171,7 @@ def init_db():
     );
 
     CREATE INDEX IF NOT EXISTS idx_snap_coin ON snapshots(coin_id, snapshot_date);
+    CREATE INDEX IF NOT EXISTS idx_snap_symbol ON snapshots(symbol, snapshot_date);
     CREATE INDEX IF NOT EXISTS idx_fs_date ON factor_scores(pick_date);
     """)
 

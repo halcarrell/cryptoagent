@@ -269,7 +269,7 @@ python3 weight_refitter.py validate  # walk-forward test: do new weights improve
 python3 weight_refitter.py refit     # generate weights.json
 ```
 
-Review `weights.json` before manually updating `WEIGHTS` in `crypto_agent.py`.
+`weights.json` is loaded automatically on the next daily screener run — no code change or redeploy needed. The Sunday auto-tune does this for you. Run `validate` before `refit` to confirm the new weights improve walk-forward performance before writing the file.
 
 ### Common Problems
 
