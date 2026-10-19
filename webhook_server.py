@@ -165,14 +165,15 @@ def _run_opportunity_scan():
         cur.execute("SELECT symbol, composite_score, rank FROM picks WHERE pick_date = ? ORDER BY rank", (today,))
         picks = [{"symbol": r[0], "score": r[1], "rank": r[2]} for r in cur.fetchall()]
 
-        # Short Watch — bottom-5 by composite score (most negative = weakest = best short candidates)
-        # These are the high-liquidity coins (BTC, ETH, BNB, DOGE, SHIB) the screener doesn't pick
-        # as longs because they can't outperform themselves, but they're ideal shorts in RISK_OFF.
+        # Short Watch — weakest coins by composite score. Fetch 20 (matching cmd_daily)
+        # so that non-Binance coins filtered out by fetch_binance_ohlcv don't exhaust
+        # the pool before we reach 5 actual scannable short candidates. cmd_daily uses
+        # the same LIMIT 20 + US-tradeable filter before slicing to 5.
         cur.execute("""
             SELECT symbol, composite_score FROM factor_scores
-            WHERE pick_date = ?
+            WHERE pick_date = ? AND composite_score IS NOT NULL
             ORDER BY composite_score ASC
-            LIMIT 5
+            LIMIT 20
         """, (today,))
         short_watch = [{"symbol": r[0], "score": r[1], "rank": 999, "is_short_watch": True}
                        for r in cur.fetchall()]
