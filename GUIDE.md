@@ -35,7 +35,7 @@ Every day your system automatically:
 ### Step 1 — Get the Code on GitHub
 
 ```bash
-cd "/Users/halcarrell/Documents/Claude/Projects/Crypto research/files"
+cd cryptoagent   # or wherever you cloned/downloaded the repo
 git remote add origin https://github.com/YOUR_USERNAME/cryptoagent.git
 git push -u origin main
 ```
@@ -80,7 +80,7 @@ Open your Railway domain in a browser:
 ### Step 4 — Run the First Screener
 
 ```bash
-cd "/Users/halcarrell/Documents/Claude/Projects/Crypto research/files"
+cd cryptoagent   # or wherever you cloned the repo
 python3 crypto_agent.py fetch
 python3 crypto_agent.py report
 ```
