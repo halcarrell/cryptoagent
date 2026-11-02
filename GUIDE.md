@@ -286,7 +286,7 @@ python3 weight_refitter.py refit     # generate weights.json
 | Stablecoin or pegged token in picks | Price-stability filter should catch it — check if price is near $1 with <3% 30d move |
 | No paper trades opening | Check `min_score` in `config.json` (currently 2.5; auto-tuned by weekly refitter) — if everything is "pass", screener score may be below threshold |
 | Alerts disappeared in TradingView | Re-create them — alerts occasionally expire or get removed |
-| Daily test agent not posting | Check claude.ai conversations list for the agent run output; confirm GitHub repo is public |
+| Daily self-test not posting to Discord | Check Railway logs for `[self-test]` lines; confirm `RAILWAY_PUBLIC_DOMAIN` is set in Railway env vars (Settings → Variables → `RAILWAY_PUBLIC_DOMAIN` = your service domain without `https://`) |
 
 ---
 

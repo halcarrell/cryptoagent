@@ -549,6 +549,29 @@ def test_unit_functions():
         # refit ran), volume should differ by more than 0.02 from the static prior.
         assert abs(w["volume"] - 0.18) > 0.02, "weights appear to be the hardcoded prior, not weights.json"
 
+    def _weights_json_freshness():
+        """Volume weights.json should be < 14 days old (refit runs weekly).
+        Only checked on Railway where DB_PATH is under /data/ — skips locally."""
+        import json
+        # Only meaningful on Railway where the DB lives on a mounted volume (/data/).
+        # Locally, DB_PATH defaults to ./crypto_agent.db, so this is a no-op.
+        if not DB_PATH.is_absolute() or str(DB_PATH.parent) == ".":
+            return
+        volume_weights = DB_PATH.parent / "weights.json"
+        if not volume_weights.exists():
+            return  # refit has never run yet on this instance — skip
+        with open(volume_weights) as f:
+            data = json.load(f)
+        gen_str = data.get("generated_at", "")
+        if not gen_str:
+            return  # old format without timestamp
+        gen_dt = datetime.strptime(gen_str[:10], "%Y-%m-%d").date()
+        age = (datetime.now(timezone.utc).date() - gen_dt).days
+        assert age <= 14, (
+            f"weights.json is {age} days old (last refit: {gen_str[:10]}) — "
+            f"Sunday weight refitter may not be running on Railway"
+        )
+
     def _blended_t1_pnl_math():
         """After T1 @ +2R then BE stop on remainder, blended PnL is +R not 0."""
         entry, t1, exit_p = 100.0, 104.0, 100.0  # 2R = 4% when stop was 2% away
@@ -600,6 +623,7 @@ def test_unit_functions():
                _score_analysis_dead_zone_requires_weak_avg,
                _score_analysis_sub_one_bucket,
                _weight_refitter_loads_weights_json,
+               _weights_json_freshness,
                _blended_t1_pnl_math,
                _btc_regime_detail_output_format]:
         test(fn.__name__.lstrip("_"), fn)
