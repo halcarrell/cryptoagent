@@ -594,8 +594,7 @@ def admin_set_config():
         conn.commit()
         conn.close()
         # Bust the in-process 1-hour cache so next decision picks it up immediately
-        import ai_trader as _at
-        _at._config_override_cache = (0.0, {})
+        ai_trader._config_override_cache = (0.0, {})
         return jsonify({"status": "ok", "updated": updates})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
