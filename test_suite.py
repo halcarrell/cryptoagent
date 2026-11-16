@@ -64,8 +64,11 @@ def test_imports():
     def _tv_integration(): import tv_integration
     def _weight_refitter(): import weight_refitter
     def _risk_monitor(): import risk_monitor
+    def _news_fetcher(): import news_fetcher
+    def _score_analysis(): import score_analysis
 
-    for fn in [_crypto_agent, _ai_trader, _notifier, _tv_integration, _weight_refitter, _risk_monitor]:
+    for fn in [_crypto_agent, _ai_trader, _notifier, _tv_integration, _weight_refitter,
+               _risk_monitor, _news_fetcher, _score_analysis]:
         test(fn.__name__.lstrip("_"), fn)
 
 
