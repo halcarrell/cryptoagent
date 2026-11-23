@@ -20,7 +20,7 @@ from email.utils import parsedate_to_datetime
 TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "")
 
 _RSS_FEEDS = [
-    "https://feeds.feedburner.com/CoinDesk",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
     "https://decrypt.co/feed",
 ]

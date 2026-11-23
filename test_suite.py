@@ -335,6 +335,53 @@ def test_unit_functions():
                                                         "close": 1.5, "volume": 100}] * 49)
         assert result2.get("long_ok") is False and result2.get("short_ok") is False
 
+    def _entry_conditions_uptrend_long_ok():
+        """compute_entry_conditions returns long_ok=True when all long conditions are met:
+        EMA50 > EMA200, close > VWMA, vol 2× avg, green candle."""
+        import ai_trader
+        # Build 200 rising candles that satisfy all long conditions.
+        # Prices rise linearly 10 → 210 so EMA50 ends well above EMA200.
+        candles = []
+        base_vol = 1000.0
+        for i in range(200):
+            price = 10.0 + i  # steadily rising
+            # Last candle: green (open < close), high volume, above VWMA
+            if i == 199:
+                candles.append({"open": price * 0.98, "high": price * 1.02,
+                                 "low": price * 0.97, "close": price,
+                                 "volume": base_vol * 2.5})  # 2.5× avg = vol_ok
+            else:
+                candles.append({"open": price * 0.99, "high": price * 1.01,
+                                 "low": price * 0.98, "close": price,
+                                 "volume": base_vol})
+        result = ai_trader.compute_entry_conditions(candles)
+        assert isinstance(result.get("long_ok"), bool), "long_ok must be bool"
+        assert isinstance(result.get("short_ok"), bool), "short_ok must be bool"
+        assert result["long_ok"] is True, (
+            f"uptrend candles should produce long_ok=True; "
+            f"got long_ok={result['long_ok']} close={result.get('close'):.2f} "
+            f"e50={result.get('e50'):.2f} e200={result.get('e200'):.2f} "
+            f"vwma={result.get('vwma'):.2f} vol_ratio={result.get('vol_ratio'):.2f} "
+            f"rsi={result.get('rsi'):.1f}"
+        )
+        assert result["atr"] > 0, "ATR should be positive"
+        assert 0 <= result["rsi"] <= 100, f"RSI out of range: {result['rsi']}"
+
+    def _entry_conditions_downtrend_no_long():
+        """Falling candles should not produce long_ok=True (EMA50 < EMA200)."""
+        import ai_trader
+        # 200 falling candles: prices 210 → 10, so EMA50 < EMA200
+        candles = []
+        base_vol = 1000.0
+        for i in range(200):
+            price = 210.0 - i
+            candles.append({"open": price * 1.01, "high": price * 1.02,
+                             "low": price * 0.97, "close": price,
+                             "volume": base_vol})
+        result = ai_trader.compute_entry_conditions(candles)
+        assert result["long_ok"] is False, \
+            f"downtrend should not produce long_ok=True, got {result['long_ok']}"
+
     def _smooth_weights_clamp_and_renorm():
         import weight_refitter as wr
         # Use actual CURRENT_WEIGHTS as the baseline (sums to 1.0)
@@ -614,6 +661,7 @@ def test_unit_functions():
 
     for fn in [_strip_quote_correctness, _generate_signal_id_format,
                _surprise_ratio_tags, _entry_conditions_insufficient_candles,
+               _entry_conditions_uptrend_long_ok, _entry_conditions_downtrend_no_long,
                _smooth_weights_clamp_and_renorm, _correlation_math_and_edge_cases,
                _staking_derivative_exclusion,
                _decide_trade_rejects_stale_signal, _decide_trade_rejects_wide_stop,
